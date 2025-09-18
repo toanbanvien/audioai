@@ -1,0 +1,26 @@
+.back-to-top {
+	display: none;
+	padding: 0;
+	min-height: auto;
+	position: fixed;
+	bottom: 30px;
+	border: 0;
+	right: 5px;
+	width: 41px;
+	height: 41px;
+	line-height: 42px;
+	border-radius: 100%;
+	cursor: pointer;
+	color: #fff;
+	font-size: 1.55em;
+	z-index: 999;
+	transition: all ease 0.35s;
+
+	&:hover {
+		filter: brightness(95%);
+	}
+
+	svg {
+		stroke: #fff;
+	}
+}

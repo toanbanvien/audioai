@@ -1,0 +1,27 @@
+.dark-mode {
+
+	#add_payment_method #payment,
+	.woocommerce-cart #payment,
+	.woocommerce-checkout #payment {
+		background: transparent;
+	}
+
+	&.woocommerce ul.products li.product .button,
+	&.woocommerce .button.button,
+	&.woocommerce .button.button.alt,
+	&.woocommerce .button.button.alt:hover,
+	&.woocommerce #respond input#submit,
+	&.woocommerce-page a.button.alt,
+	&.woocommerce-page #place_order {
+		background-color: var(--wp--preset--color--btn-bgr);
+		color: var(--wp--preset--color--text-primary);
+	}
+
+	.site-header-cart .button {
+		background-color: var(--wp--preset--color--btn-bgr) !important;
+	}
+
+	button.button:disabled[disabled] {
+		color: #000;
+	}
+}

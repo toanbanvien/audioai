@@ -1,0 +1,359 @@
+/* ==========================================================================
+   CSS for Customizer Custom Controls
+   ========================================================================== */
+
+/* ==========================================================================
+   Standard Input
+   ========================================================================== */
+input[type="text"],
+input[type="number"],
+input[type="url"],
+input[type="email"],
+input[type="date"] {
+	background-color: #fcfcff;
+	position: relative;
+	border-radius: 0;
+	border: 1px solid #eee;
+	height: 27px;
+	line-height: 27px;
+	outline: none;
+	box-shadow: none;
+}
+
+input[type="text"]:active,
+input[type="text"]:focus,
+input[type="number"]:active,
+input[type="number"]:focus {
+	outline: none;
+	box-shadow: none;
+}
+
+/* ==========================================================================
+   Pill Checkboxes
+   ========================================================================== */
+.pill_checkbox_control .checkbox-label > input {
+	display: none;
+}
+
+.pill_checkbox_control .checkbox-label > .sortable-pill-title {
+	box-sizing: border-box;
+	cursor: pointer;
+	background-color: #ddd;
+	padding: 5px 15px;
+	border-radius: 20px;
+	font-size: 14px;
+	display: inline-block;
+	margin-bottom: 5px;
+}
+
+.sortable_pills.fullwidth_pills {
+	width: 94%;
+	margin: auto;
+	padding-top: 0.5rem;
+}
+
+.pill_checkbox_control .sortable .checkbox-label > .sortable-pill-title {
+	cursor: move;
+}
+
+.pill_checkbox_control .sortable.fullwidth_pills .checkbox-label > .sortable-pill-title {
+	cursor: pointer;
+}
+
+.pill_checkbox_control .checkbox-label > input:checked + .sortable-pill-title {
+	background-color: #2084bd;
+	color: #fff;
+}
+
+.pill_checkbox_control .checkbox-label > input:checked + .sortable-pill-title::before {
+	display: inline-block;
+	font-style: normal;
+	font-variant: normal;
+	text-rendering: auto;
+	-webkit-font-smoothing: antialiased;
+	font-family: dashicons;
+	font-weight: 400;
+	font-size: 24px;
+	content: "\f147";
+	margin-left: -10px;
+	vertical-align: bottom;
+}
+
+.pill_checkbox_control .fullwidth_pills .checkbox-label > .sortable-pill-title {
+	width: 100%;
+	border-radius: 0;
+}
+
+.pill_checkbox_control .sortable.fullwidth_pills .checkbox-label > .sortable-pill-title {
+	width: 90%;
+}
+
+.pill-ui-state-highlight {
+	display: inline-block;
+	padding: 5px 15px;
+	border-radius: 20px;
+	font-size: 1rem;
+	border: 1px dotted #2084bd;
+	margin-bottom: 5px;
+	height: 16px;
+}
+
+.pill_checkbox_control .sortable_pills .pill-ui-state-highlight {
+	width: 50px;
+	border-radius: 20px;
+}
+
+.pill_checkbox_control .sortable_pills.fullwidth_pills .pill-ui-state-highlight {
+	width: 90%;
+	border-radius: 0;
+}
+
+.pill_checkbox_control .dashicons-sort {
+	margin: 5px 0 0 1px;
+	color: #d4d4d4;
+	cursor: move;
+}
+
+.pill_checkbox_control .dashicons-sort:hover {
+	color: #a7a7a7;
+}
+
+.pill_checkbox_control .sortable_pills.fullwidth_pills .ui-sortable-helper {
+	width: calc(100% - 25px) !important;
+}
+
+/* ==========================================================================
+   Sortable Repeater
+   ========================================================================== */
+.sortable {
+	list-style-type: none;
+	margin: 0;
+	padding: 0;
+}
+
+.sortable input[type="text"] {
+	margin: 5px 5px 5px 0;
+	width: 80%;
+}
+
+.sortable div {
+	cursor: move;
+}
+
+.sortable-repeater-title {
+	line-height: 1;
+	padding-top: 0.75rem;
+}
+
+.repeater .dashicons-sort {
+	margin: 8px 5px 0 5px;
+	color: #d4d4d4;
+}
+
+.repeater .dashicons-sort:hover {
+	color: #a7a7a7;
+}
+
+.customize-control-sortable-repeater-delete .dashicons-no-alt {
+	text-decoration: none;
+	margin: 8px 0 0 0;
+	font-weight: 600;
+}
+
+.customize-control-sortable-repeater-delete {
+	color: #d4d4d4;
+}
+
+/* ==========================================================================
+ Single Accordion
+ ========================================================================== */
+.single-accordion-toggle {
+	font-size: 14px;
+	font-weight: 600;
+	line-height: 24px;
+	padding: 10px 5px 5px 0;
+	cursor: pointer;
+}
+
+.accordion-icon-toggle {
+	font-size: 18px;
+	margin-left: 5px;
+	margin-top: 5px;
+	transition: transform 0.3s ease-in-out;
+}
+
+.single-accordion-toggle-rotate .accordion-icon-toggle {
+	filter: progid: DXImageTransform.Microsoft.BasicImage(rotation=-0.5);
+	transform: rotate(-45deg);
+	display: inline-block;
+}
+
+.single-accordion {
+	display: none;
+}
+
+.single-accordion ul {
+	margin: 0;
+	padding: 0;
+}
+
+.single-accordion li {
+	background-color: #e4e4e4;
+	color: #888;
+	width: 115px;
+	display: inline-block;
+	padding: 5px;
+	margin: 5px;
+	text-align: center;
+}
+
+.single-accordion li svg {
+	margin-left: 5px;
+	vertical-align: middle;
+	transform: scale(0.75);
+}
+
+/* ==========================================================================
+   Slider Control
+   ========================================================================== */
+
+.customize-control-prespa-range-slider .p-slider {
+	position: relative;
+	width: calc(100% - 60px);
+	height: 6px;
+	background-color: rgba(0, 0, 0, 0.1);
+	cursor: pointer;
+	transition: background 0.5s;
+}
+
+.customize-control-prespa-range-slider .has-unit .p-slider {
+	width: calc(100% - 90px);
+}
+
+.customize-control-prespa-range-slider .gp_range_value.hide-value {
+	display: none;
+}
+
+.customize-control-prespa-range-slider .gp_range_value.hide-value + .p-slider {
+	width: 100%;
+}
+
+.customize-control-prespa-range-slider .p-slider .ui-slider-handle {
+	height: 16px;
+	width: 16px;
+	background-color: #3498d9;
+	display: inline-block;
+	position: absolute;
+	top: 50%;
+	-webkit-transform: translateY(-50%) translateX(-4px);
+	transform: translateY(-50%) translateX(-4px);
+	border-radius: 50%;
+	cursor: pointer;
+}
+
+.gp-range-title-area {
+	display: flex;
+}
+
+.gp-range-slider-controls {
+	margin-left: auto;
+}
+
+.customize-control-prespa-range-slider .wrapper {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+}
+
+.customize-control-prespa-range-slider .gp_range_value {
+	font-size: 14px;
+	padding: 0;
+	font-weight: 400;
+	width: 50px;
+	display: flex;
+}
+
+.customize-control-prespa-range-slider .has-unit .gp_range_value {
+	width: 80px;
+}
+
+.customize-control-prespa-range-slider .gp_range_value span.value {
+	font-size: 12px;
+	width: calc(100% - 2px);
+	text-align: center;
+	min-height: 30px;
+	background: #fff;
+	line-height: 30px;
+	border: 1px solid #ddd;
+}
+
+.customize-control-prespa-range-slider .has-unit .gp_range_value span.value {
+	width: calc(100% - 32px);
+	display: block;
+}
+
+.customize-control-prespa-range-slider .gp_range_value .unit {
+	width: 29px;
+	text-align: center;
+	font-size: 12px;
+	line-height: 30px;
+	background: #fff;
+	border: 1px solid #ddd;
+	margin-left: 1px;
+}
+
+.customize-control-prespa-range-slider .prespa-range-slider-reset span {
+	font-size: 16px;
+	line-height: 22px;
+}
+
+.customize-control-prespa-range-slider .gp_range_value input {
+	font-size: 12px;
+	padding: 0;
+	text-align: center;
+	min-height: 30px;
+	height: auto;
+	border-radius: 0;
+	border-color: #ddd;
+}
+
+.customize-control-prespa-range-slider .has-unit .gp_range_value input {
+	width: calc(100% - 30px);
+}
+
+.customize-control-prespa-range-slider .gp-range-title-area .dashicons {
+	cursor: pointer;
+	font-size: 11px;
+	width: 20px;
+	height: 20px;
+	line-height: 20px;
+	color: #222;
+	text-align: center;
+	position: relative;
+	top: 2px;
+}
+
+.customize-control-prespa-range-slider .gp-range-title-area .dashicons:hover {
+	background: #fafafa;
+}
+
+.customize-control-prespa-range-slider .gp-range-title-area .dashicons.selected {
+	background: #fff;
+	color: #222;
+}
+
+.customize-control-prespa-range-slider .gp-device-controls > span:first-child:last-child {
+	display: none;
+}
+
+.customize-control-prespa-range-slider .sub-description {
+	margin-top: 10px;
+}
+
+/* ==========================================================================
+   Textarea/TinyMCE
+   ========================================================================== */
+.tinymce-control textarea {
+	width: 100%;
+	padding: 10px;
+}

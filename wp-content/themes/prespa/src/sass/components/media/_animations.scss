@@ -1,0 +1,415 @@
+/* ================ 
+ * TEXT ANIMATION 
+ * ================== */
+.p-scale-change-animation {
+	animation: prespa_scale_change 1s forwards;
+}
+
+/* Text */
+.p-typewrite-animation {
+	opacity: 0;
+	visibility: hidden;
+}
+
+/*Links */
+.p-underline-animation a {
+	background: linear-gradient(to right, currentcolor 0%, currentcolor 100%);
+	background-size: 0 3px;
+	background-repeat: no-repeat;
+	background-position: left 100%;
+	display: inline;
+	transition: background-size 0.6s ease-in-out;
+
+	&:hover {
+		background-size: 100% 3px;
+	}
+}
+
+/* ==========================
+  On Scroll animations 
+  =========================== */
+
+.p-animation-text-transform {
+	transform: perspective(2000px) rotateX(12deg);
+}
+ 
+.p-animation-text-transform.animated {
+	animation-duration: .8s;
+	opacity: 0.25;
+	animation-timing-function: ease-in-out;
+	animation-fill-mode: forwards;
+	transform: perspective(2000px) rotateX(18deg);
+	animation-name: prespa_text_transform;
+}
+
+.p-animation-zoom-in {
+	transform: scale3d(0.9, 0.9, 0.9);
+}
+
+.p-animation-zoom-in.animated {
+	animation-duration: .8s;
+	opacity: 0.75;
+	animation-timing-function: ease-in-out;
+	animation-fill-mode: forwards;
+	animation-name: prespa_zoom_in;
+}
+
+// section the right way
+.p-animation-down-up {
+
+	.wp-block-column:nth-child(1) {
+		transform: translateY(-20px);
+		transition: 0.8s all 0.1s;
+		opacity: 0.6;
+	}
+
+	&.animated {
+
+		.wp-block-column:nth-child(1) {
+			transform: translateY(0);
+			opacity: 1;
+		}
+	}
+
+	.wp-block-column:nth-child(2) {
+		transform: translateY(20px);
+		transition: 0.8s all 0.2s;
+	}
+
+	&.animated {
+
+		.wp-block-column:nth-child(2) {
+			transform: translateY(0);
+		}
+	}
+}
+
+.p-animation-text-moveUp {
+	opacity: 0;
+}
+
+.p-animation-text-moveUp {
+	&.animated {
+		animation: prespa_text_move_up .8s both;
+		opacity: 1;
+	}
+}
+
+@media (min-width:54rem) {
+	.p-animation-move-sideways {
+
+	.wp-block-column {
+		transition: 0.45s ease-in-out;
+	}
+	
+	  .wp-block-column:nth-child(1) {
+		transform: translateX(-2em);
+	  }
+	
+	  .wp-block-column:nth-child(2) {
+		transform: translateY(-2em);
+		transition-delay: 0.15s;
+	  }
+	
+	  .wp-block-column:nth-child(3) {
+		transform: translateX(2em);
+		transition-delay: 0.3s;
+	  }
+	}
+	
+	.p-animation-move-sideways.animated {
+	  .wp-block-column {
+		transform: translate(0, 0);
+	  }
+	}
+}
+
+/* =====================
+Button Hover Animations 
+======================== */
+@media (min-width: 54rem) {
+
+	.p-btn-animation-border-move > a {
+		position: relative;
+
+		&::before {
+			border: 2px solid transparent;
+			opacity: 0.9;
+
+			@include button-border-move-animation;
+		}
+
+		&:hover::before {
+			border: 2px solid var(--border-color);
+			opacity: 0;
+			transform: scale(1.2, 1.5);
+		}
+	}
+
+	/* Rollover animation */
+	.p-btn-animation-rollover {
+
+		a {
+			position: relative;
+			overflow: hidden;
+			display: block;
+			text-align: center;
+		}
+
+		a span {
+			display: block;
+			transition: transform 700ms cubic-bezier(0.68, -0.55, 0.265, 1.55);
+		}
+
+		a::before {
+			content: attr(data-text);
+			display: inline-block;
+			position: absolute;
+			transition: top 700ms cubic-bezier(0.68, -0.55, 0.265, 1.55);
+			padding: inherit;
+			top: 100%;
+			left: 0;
+			right: 0;
+			text-align: center;
+			font-size: inherit;
+		}
+
+		a:hover span {
+			transform: translateY(-150%) !important;
+		}
+
+		a:hover::before {
+			top: 0;
+		}
+
+		&.is-style-skew a::before,
+		&.is-style-skew--outline a::before {
+			transform: skew(15deg);
+		}
+	}
+
+	/* Border Animation */
+	.p-btn-animation-border {
+
+		a {
+			position: relative;
+			transition: 0.6s;
+			border: 2px solid transparent;
+		}
+
+		a:hover {
+			border: 2px solid transparent;
+			color: currentcolor;
+		}
+
+		a::before,
+		a::after {
+			width: 100%;
+			height: 100%;
+			z-index: 3;
+			content: "";
+			position: absolute;
+			top: 0;
+			left: 0;
+			box-sizing: border-box;
+			transform: scale(0);
+			transition: 0.6s;
+		}
+
+		a::before {
+			border-bottom: 2px solid currentcolor;
+			border-left: 2px solid currentcolor;
+			transform-origin: 0 100%;
+		}
+
+		a::after {
+			border-top: 2px solid currentcolor;
+			border-right: 2px solid currentcolor;
+			transform-origin: 100% 0%;
+		}
+
+		a:hover::after,
+		a:hover::before {
+			transform: scale(1);
+		}
+	}
+
+	.p-btn-animation-line {
+		a {
+			background-image: linear-gradient(to right, CurrentColor 0%, CurrentColor 100%);
+			background-repeat: no-repeat;
+			background-position: left 100%;
+			background-size: 0 2px;
+			display: inline;
+			transition: background-size 0.6s ease-in-out;
+			&:hover {
+				background-size: 100% 2px;
+			}
+		}
+	}
+
+	/* Slide in effect */
+
+	.p-btn-animation-slide-in {
+
+		a {
+			background-image: linear-gradient(to right, rgba(0, 0, 0, 0.05) 0%, rgba(0, 0, 0, 0.15) 100%) !important;
+			background-size: 0 100%;
+			background-repeat: no-repeat;
+			background-position: left 100%;
+			display: inline-block;
+			transition: background-size 0.6s ease-in-out;
+		}
+
+		a:hover {
+			background-size: 100% 100%;
+		}
+
+	}
+
+	/* Pulse animation */
+
+	.p-btn-animation-pulse {
+
+		&.wp-block-button {
+			transition: 0.3s;
+		}
+
+		&.wp-block-button:hover {
+			animation: prespa_pulse 1s infinite;
+			transition: 0.3s;
+		}
+	}
+
+	/* Btn Shadow*/
+	.p-btn-animation-shadow a {
+		box-shadow: 7px 7px 0 0 rgba(26, 30, 33, 0.75);
+	}
+
+	.p-btn-animation-shadow a,
+	.p-btn-animation-shadow--outline a {
+		position: relative;
+		right: 0;
+		bottom: 0;
+		transition: all 0.15s cubic-bezier(0.45, 0.05, 0.55, 0.95);
+	}
+
+	.p-btn-animation-shadow a:hover,
+	.p-btn-animation-shadow--outline a:hover {
+		right: -7px;
+		bottom: -7px;
+		box-shadow: none;
+	}
+
+	.p-btn-animation-shadow:hover {
+		box-shadow: none;
+	}
+
+	.p-btn-animation-hover-arrow .wp-block-button__link::after{
+		transition: .3s ease-in-out;
+		opacity: 0;
+		content: ">";
+	}
+
+	.p-btn-animation-hover-arrow .wp-block-button__link:hover::after {
+		opacity: 1;
+		padding-left: .375rem;
+	}
+
+}
+
+/* Block Pattern keyframes */
+
+@keyframes prespa_zoom_in {
+
+	0% {
+		opacity: 0.75;
+		transform: scale3d(0.9, 0.9, 0.9);
+	}
+
+	100% {
+		opacity: 1;
+		transform: scale3d(1, 1, 1);
+	}
+}
+
+@keyframes prespa_text_transform {
+
+	0% {
+		opacity: 0.25;
+	}
+
+	100% {
+		opacity: 1;
+		transform: rotateX(0);
+	}
+}
+
+@keyframes prespa_text_move_up {
+	from {
+	  opacity: 0;
+	  transform: translate3d(0, 30%, 0); 
+	}
+	to {
+	  opacity: 1;
+	  transform: none; 
+	} 
+}
+
+/* header image animations */
+@keyframes prespa_scale_change {
+
+	0% {
+		transform: scale(1);
+		opacity: 0;
+	}
+
+	25% {
+		transform: scale(1.2);
+		opacity: 0;
+	}
+
+	100% {
+		transform: scale(1);
+		opacity: 1;
+	}
+}
+
+/* button move up */
+@keyframes prespa_moveUp {
+
+	0% {
+		opacity: 0;
+		top: 30px;
+	}
+
+	70% {
+		opacity: 0;
+		top: 30px;
+	}
+
+	80% {
+		opacity: 0.5;
+		top: 0;
+	}
+
+	100% {
+		opacity: 1;
+		top: 0;
+	}
+}
+
+@keyframes prespa_pulse {
+
+	0% {
+		transform: scale(1);
+	}
+
+	70% {
+		transform: scale(0.9);
+	}
+
+	100% {
+		transform: scale(1);
+	}
+}

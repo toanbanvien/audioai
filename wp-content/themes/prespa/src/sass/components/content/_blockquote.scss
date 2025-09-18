@@ -1,0 +1,13 @@
+blockquote {
+	position: relative;
+	padding-left: 1em;
+	margin-left: 3em;
+	border-left: 1px solid #999;
+
+	&::before {
+		content: "“";
+		position: absolute;
+		font-size: 3.25rem;
+		left: -0.65em;
+	}
+}

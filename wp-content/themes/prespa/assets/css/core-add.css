@@ -1,0 +1,12 @@
+.wp-block-latest-posts:not(.is-grid) > li::after {
+	display: table;
+	content: '';
+	clear: both;
+}
+
+.wp-block-latest-posts__featured-image {
+	float: left;
+	margin-right: 1rem;
+	width: 39%;
+	clear: both;
+}

@@ -1,0 +1,65 @@
+.site-footer {
+	padding: 1rem;
+
+	figure {
+		margin: 1rem 0;
+	}
+}
+
+.site-info {
+	text-align: center;
+	padding: 1rem 0 0;
+}
+
+.footer-content {
+	margin: auto;
+
+	&,
+	p {
+		font-size: var(--wp--custom--typography--font-size--normal);
+	}
+
+	.social-icons {
+		display: block;
+		text-align: center;
+	}
+
+	.social-icon {
+		display: inline-block;
+		padding: 1rem 1rem 1rem 0;
+
+		svg {
+			width: 85%;
+		}
+	}
+}
+
+.widget-column {
+	padding: 1rem 0;
+}
+
+.widget-area {
+	padding-bottom: 1.5em;
+
+	.search-icon svg {
+		width: 1.125rem;
+	}
+}
+
+@media (min-width: 54rem) {
+
+	.site-footer .widget-area {
+		display: flex;
+		gap: 2rem;
+	}
+
+	.widget-column {
+		padding-right: 2rem;
+		width: 25%;
+	}
+
+	.widget-column:not(:last-child) {
+		border-right: 1px solid var(--p-line);
+	}
+
+}

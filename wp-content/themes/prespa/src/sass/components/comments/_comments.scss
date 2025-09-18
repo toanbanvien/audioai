@@ -1,0 +1,38 @@
+.comment:not(:last-child) {
+	padding-bottom: 2rem;
+	margin-bottom: 1rem;
+}
+
+.comment-content a {
+	word-wrap: break-word;
+}
+
+.comment-author {
+	padding-bottom: .5rem;
+	border-bottom: 1px solid var(--p-border);
+}
+
+.comment-author.vcard {
+	margin-bottom: 1rem;
+	img {
+		margin-right: .25rem;
+		border-radius: 100%;
+	}
+}
+
+.comment-list {
+	padding: 0;
+}
+
+.bypostauthor {
+	display: block;
+}
+
+.fn {
+	display: inline;
+	vertical-align: baseline;
+
+	&::after {
+		visibility: hidden;
+	}
+}

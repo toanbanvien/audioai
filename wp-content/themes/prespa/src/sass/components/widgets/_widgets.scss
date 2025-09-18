@@ -1,0 +1,108 @@
+.widget {
+	margin: 0 0 2.25rem;
+
+	// Make sure select elements fit in widgets.
+	select {
+		max-width: 100%;
+	}
+
+	&.widget_search {
+		border-bottom: 0;
+	}
+}
+
+.widget-area {
+
+	ul {
+		list-style: none;
+		padding-left: 0;
+		margin-left: 0;
+
+		ul {
+			padding-left: 1.25rem;
+		}
+	}
+
+	li:not(:last-child) {
+		border-bottom: 1px solid var(--p-shadow);
+		padding-bottom: 0.35rem;
+		margin-bottom: 1.35rem;
+	}
+
+	.wp-block-tag-cloud.is-style-outline a {
+		padding: 0.15rem 0.35rem;
+	}
+
+	h2 {
+		font-size: 26px;
+	}
+
+	.dark-mode-menu-item {
+		button {
+			color: var(--wp--preset--color--links);
+			padding-left: 0;
+			transform: scale(0.9);
+		}
+	}
+}
+
+#secondary section:not(:last-child) {
+	border-bottom: 1px solid var(--p-border-color);
+}
+
+
+#secondary {
+	section {
+		margin: 2rem 0;
+	}
+	.heading {
+		margin-top: .75rem;
+	}
+	.wp-block-search {
+		padding-bottom: .5rem;
+	}
+	.wp-block-latest-comments {
+		&__comment-link {
+			display: inline-block;
+			padding-bottom: .5rem;
+		}
+	}
+}
+
+.site-footer .widget-area {
+
+	.wp-block-heading {
+		margin-block-start: 1em;
+		margin-block-end: 1em;
+	}
+}
+
+@media (min-width: 54rem) {
+
+	.has-sidebar {
+
+		main {
+			width: 69%;
+		}
+
+		aside {
+			width: 27%;
+		}
+	}
+
+}
+
+// Recent Posts widget
+
+@media (min-width: 54rem) {
+
+	.widget-area {
+
+		.wp-block-latest-posts {
+
+			@include imgZoomIn;
+
+		}
+	}
+
+}

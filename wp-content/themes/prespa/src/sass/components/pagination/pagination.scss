@@ -1,0 +1,53 @@
+// Pagination
+.navigation {
+	margin: 1em 0;
+	width: 100%;
+}
+
+.navigation .page-numbers .navigation .page-numbers:hover,
+.navigation .page-numbers.current {
+	text-decoration: none;
+}
+
+.navigation .page-numbers {
+	display: inline-block;
+}
+
+.navigation .page-numbers {
+	font-size: 14px;
+}
+
+.navigation .page-numbers,
+.navigation .page-numbers:hover,
+.navigation .page-numbers.current {
+	display: inline-block;
+	background-color: #fff;
+	width: 42px;
+	text-align: center;
+	height: 42px;
+	line-height: 42px;
+	border: 1px solid rgba(0, 0, 0, 0.1);
+	margin-right: 2px;
+	margin-bottom: 5px;
+	font-size: 0.875rem;
+	border-radius: 2px;
+}
+
+.navigation .page-numbers:hover,
+.navigation .page-numbers.current {
+	color: #fff;
+	text-decoration: none;
+}
+
+@media (max-width: 420px) {
+
+	.navigation .page-numbers,
+	.navigation .page-numbers:hover,
+	.navigation .page-numbers.current {
+		font-size: 14px;
+		width: 30px;
+		height: 30px;
+		line-height: 28px;
+		margin-right: 0;
+	}
+}

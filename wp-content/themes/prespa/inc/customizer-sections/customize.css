@@ -1,0 +1,21 @@
+.go-pro-section {
+    display: flex;
+    padding: 0;
+    justify-content: center;
+}
+
+.control-section-prespa-pro-section .accordion-section-title .button {
+    text-align: center;
+    font-weight: 500;
+    background: rgba(186, 12, 73, 0.75);
+    color: #fff;
+    border-color: rgba(186, 12, 73, 0.75);
+    border-radius: 6px;
+    padding: 6px 20px;
+    font-size: 14px;
+    transition: .4s ease-in;
+}
+
+.control-section-prespa-pro-section .accordion-section-title .button:hover {
+    background: rgba(186, 12, 73, 1);
+}

@@ -1,0 +1,136 @@
+// Center block
+@mixin center-block {
+	display: block;
+	margin-left: auto;
+	margin-right: auto;
+}
+
+// Column width with margin
+@mixin column-width($numberColumns: 3) {
+	width: map-get($columns, $numberColumns) - calc(( ( $columns__margin * ( $numberColumns - 1 ) ) / $numberColumns ));
+}
+
+//clarfix
+@mixin clearfix {
+
+	&::after {
+		display: table;
+		content: "";
+		clear: both;
+	}
+}
+
+@mixin imgZoomIn () {
+	> li {
+		position: relative;
+	}
+
+	img:hover {
+		transform: translate(0%, 0%) scale3d(1.1, 1.1, 1.1);
+		opacity: 0.75;
+	}
+
+	> li > .wp-block-latest-posts__featured-image {
+		display: inline-block;
+		overflow: hidden;
+		line-height: 0;
+	}
+
+	> li > figure {
+		display: inline-block;
+		overflow: hidden;
+	}
+
+	img {
+		transition: all 0.8s ease-in-out;
+	}
+
+	.wp-block-latest-posts__post-date {
+		padding-top: 0.35rem;
+	}
+}
+
+@mixin position( $position, $args: () ) {
+	$offsets: top right bottom left;
+	position: $position;
+
+	@each $offset in $offsets {
+		$index: index($args, $offset);
+
+		@if $index {
+
+			@if $index == length( $args ) {
+				#{$offset}: 0;
+			} @else {
+				$next: nth($args, $index + 1);
+
+				@if is-valid-length( $next ) {
+					#{$offset}: $next;
+				} @else if index( $offsets, $next ) {
+					#{$offset}: 0;
+				} @else {
+
+					@warn "Invalid value `#{$next}` for offset `#{$offset}`.";
+				}
+			}
+		}
+	}
+}
+
+@mixin absolute( $args: () ) {
+
+	@include position( absolute, $args );
+}
+
+@mixin fixed( $args: () ) {
+
+	@include position( fixed, $args );
+}
+
+@mixin relative( $args: () ) {
+
+	@include position( relative, $args );
+}
+
+// Calculate rems
+@function rem-calc($size) {
+	$remValue: calc($size / 16) + rem;
+
+	@return $remValue;
+}
+
+@mixin prespa-zoom {
+	transition: all 0.8s ease-in-out;
+
+	&:hover {
+		transform: translate(0%, 0%) scale3d(1.1, 1.1, 1.1);
+		opacity: 0.75;
+	}
+}
+
+// header buttons animation
+
+@mixin button-border-move-animation {
+	content: "";
+	position: absolute;
+	z-index: 5;
+	left: 0;
+	top: 0;
+	right: 0;
+	bottom: 0;
+	margin: auto;
+	border-radius: 4px;
+	transition: opacity 0.5s ease, border 0.5s ease, transform 0.5s ease;
+}
+
+@mixin social-icon {
+	width: 2rem;
+	height: 2rem;
+	display: inline-block;
+	border: 0.0625rem solid var(--wp--preset--color--text-primary);
+	text-align: center;
+
+	svg {
+		stroke: var(--wp--preset--color--text-primary);
+	}
+}

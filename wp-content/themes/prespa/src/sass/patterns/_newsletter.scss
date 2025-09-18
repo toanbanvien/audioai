@@ -1,0 +1,112 @@
+/* First newsletter */
+.prespa-newsletter {
+	padding: 50px 20px;
+	background: #f3f3f3;
+	margin-right: -15px;
+	margin-left: -15px;
+	display: flex;
+}
+
+.newsletter-form {
+	display: flex;
+	gap: .5rem;
+	flex-wrap: wrap;
+	margin: auto 0 auto auto;
+
+	input[type="text"],
+	input[type="email"],
+	button {
+		height: 40px;
+		vertical-align: middle;
+		padding-left: .5rem;
+	}
+
+	button {
+		border-radius: .25rem;
+	}
+}
+
+@media (max-width: 37.5rem) {
+
+	.prespa-newsletter {
+		display: flex;
+		flex-wrap: wrap;
+	}
+
+}
+
+/* Second newsletter */
+.newsletter-pattern {
+	margin-top: 2rem;
+	margin-bottom: 2rem;
+}
+
+.newsletter-pattern .wp-block-columns .wp-block-columns .wp-block-column:nth-child(1) {
+	position: relative;
+	margin-right: 2rem;
+}
+
+.newsletter-pattern .lines {
+	width: 1.6rem;
+	height: .125rem;
+	background-color: white;
+	color: white;
+	position: absolute;
+	margin: 0 auto;
+	top: 1.2rem;
+	left: 0;
+	right: 0;
+	transition: 0.5s;
+	opacity: 0;
+}
+
+.newsletter-pattern .lines::before {
+	top: -0.5rem;
+}
+
+.newsletter-pattern .lines::before,
+.newsletter-pattern .lines::after {
+	content: "";
+	width: 1.6rem;
+	height: .125rem;
+	background-color: white;
+	position: absolute;
+	margin: 0 auto;
+	left: 0;
+	right: 0;
+}
+
+@keyframes prespa_lines_move {
+
+	0% {
+		opacity: 0;
+		transform: translateX(-1rem);
+	}
+
+	100% {
+		opacity: 1;
+		transform: translateX(0);
+	}
+}
+
+@media (max-width: 781px) {
+	.newsletter-pattern {
+
+		img {
+			width: 25%;
+		}
+
+		.wp-block-column {
+
+			.wp-block-buttons {
+				justify-content: left;
+			}
+		}
+	}
+}
+
+@media(min-width: 782px) {
+	.newsletter-pattern:hover .lines {
+		animation: prespa_lines_move ease 1s forwards;
+	}
+}

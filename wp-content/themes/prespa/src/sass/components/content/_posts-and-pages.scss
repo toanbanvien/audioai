@@ -1,0 +1,253 @@
+.sticky {
+	display: block;
+}
+
+.updated:not(.published) {
+	display: none;
+}
+
+.text-wrapper .entry-title {
+	margin-top: 0;
+	line-height: var(--wp--custom--typography--line-height--medium);
+}
+
+.text-wrapper .entry-title a {
+	font-size: 26px;
+}
+
+.entry-content::after {
+	clear: both;
+	display: table;
+	content: "";
+}
+
+.page-links {
+	clear: both;
+	margin: 0 0 1.5em;
+}
+
+.comment-list {
+	list-style: none;
+}
+
+.modal-open {
+	overflow: hidden;
+	width: 100%;
+	height: 100%;
+}
+
+// Categories
+
+.top-meta a,
+.categories-section .category-meta {
+	display: inline-block;
+	border-radius: 3px;
+	padding: .25rem .5rem;
+	margin-bottom: .5rem;
+}
+
+.top-meta a:nth-of-type(3n+1),
+.categories-section .category-meta {
+	color: #fff;
+}
+
+.top-meta a:nth-of-type(3n+2),
+.top-meta a:nth-of-type(3n) {
+	color: var(--wp--preset--color--text-primary);
+}
+
+.top-meta a:nth-of-type(3n+2):hover {
+	background-color: #e6b800;
+}
+
+.top-meta a:nth-of-type(3n) {
+	background: #ff7f7f;
+}
+
+.top-meta a:nth-of-type(3n):hover {
+	background-color: #f33;
+}
+
+.entry-meta,
+.entry-footer,
+.cat-links,
+.top-meta,
+.category-meta .title {
+	font-size: var(--wp--custom--typography--font-size--normal);
+}
+
+.single .hentry .post-thumbnail {
+	padding-bottom: 1rem;
+}
+
+.archive .post-thumbnail img,
+.blog .post-thumbnail img {
+	object-fit: cover;
+}
+
+.breadcrumbs {
+	font-size: var(--wp--custom--typography--font-size--normal);
+}
+
+.single .breadcrumbs + .top-meta {
+	margin-top: 1.5rem;
+}
+
+.top-meta {
+	margin-bottom: .5rem;
+}
+
+.page .entry-header .breadcrumbs {
+	margin-top: 1.5rem;
+	margin-bottom: -1rem;
+}
+
+.entry-meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: .5rem;
+
+	> span {
+		margin-right: 4px;
+	}
+
+	svg {
+		margin-right: 2px;
+		transform: scale(85%);
+		position: relative;
+		top: 6px;
+	}
+}
+
+.byline {
+
+	.author-avatar {
+		margin-right: 5px;
+	}
+}
+
+.byline .author-avatar img {
+	width: 30px;
+	height: 30px;
+}
+
+.author-avatar .avatar {
+	border: 2px solid #bbb;
+	border-radius: 100px;
+}
+
+.author-avatar {
+	display: inline-block;
+	vertical-align: middle;
+}
+
+// tables
+
+pre {
+	background: #eeeef2;
+}
+//tables
+.entry-content thead,
+.entry-content tr:nth-child(2n) td,
+.entry-content tr:nth-child(2n) th {
+	background-color: #f9f9f9;
+}
+
+.entry-content th,
+.entry-content td {
+	border-color: #e9e9e9;
+	border: 1px solid #999;
+}
+
+.entry-content th,
+.entry-content td {
+	padding: 0.75em;
+}
+
+.entry-content th,
+.entry-content td {
+	border: 1px solid #999;
+}
+
+.not-found .wp-block-columns {
+	gap: 4rem;
+}
+
+.not-found .page-content p {
+	padding-bottom: 2rem;
+}
+
+.entry-meta .feather-heart:hover {
+	cursor: pointer;
+	fill: #d01e1e;
+	stroke: #d01e1e;
+}
+
+.voted .feather-heart {
+	fill: #d01e1e;
+	stroke: #d01e1e;
+}
+
+.post-share {
+
+	svg {
+		width: 65%;
+	}
+
+	a {
+
+		@include social-icon;
+		margin-right: 1em;
+	}
+}
+
+.share-icon {
+	display: inline-block;
+	position: relative;
+	top: 4px;
+}
+
+.post-share-wrap {
+	margin-top: 1rem;
+	margin-bottom: 1rem;
+}
+
+@media (max-width: 40rem) {
+	.top-meta a {
+		line-height: 1.7em;
+	  }
+}
+
+@media (min-width: 54rem) {
+
+	.prespa-post-container .post-thumbnail {
+		position: relative;
+		display: inline-block;
+		overflow: hidden;
+
+		&:hover {
+
+			img {
+				transform: translate(0%, 0%) scale3d(1.1, 1.1, 1.1);
+				opacity: 0.75;
+			}
+		}
+
+		figure {
+			display: inline-block;
+			overflow: hidden;
+			line-height: 0;
+		}
+
+		img {
+			transition: all 0.8s ease-in-out;
+		}
+	}
+}
+
+@media(min-width: 782px){
+	.not-found .wp-block-column:nth-child(2){
+		margin-top: 2rem;
+	}
+}

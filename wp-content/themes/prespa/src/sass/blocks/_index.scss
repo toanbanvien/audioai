@@ -1,0 +1,28 @@
+// Transparent header bug fix
+@media (max-width: 781px) {
+
+	// Display image on top on mobile when there is media and arbitrary text
+	.is-swap-on-mobile {
+		display: flex;
+	}
+
+	.is-swap-on-mobile.wp-block-columns
+	.wp-block-column:nth-child(2) {
+		order: 0;
+	}
+
+	.is-swap-on-mobile.wp-block-columns
+	.wp-block-column:nth-child(1) {
+		order: 1;
+	}
+
+}
+
+.wp-block-button__link {
+	width: auto;
+	color: var(--wp--preset--color--white)
+}
+
+.wp-block-button.is-style-squared .wp-block-button__link {
+	border-radius: 0;
+}

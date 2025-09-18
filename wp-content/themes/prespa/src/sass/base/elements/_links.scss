@@ -1,0 +1,14 @@
+a {
+	color: var(--wp--preset--color--links);
+	text-decoration: none;
+}
+
+:where(h1, h2, h3, h4, h5, h6) {
+	a {
+		color: var(--wp--preset--color--link-headings);
+	}
+}
+
+.single .entry-content a:not(.wp-element-button):not(.button) {
+	text-decoration: underline;
+}

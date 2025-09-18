@@ -1,0 +1,38 @@
+// author box
+
+.about-author {
+    padding-bottom: 2rem;
+
+    &-inner {
+        margin-bottom: .5rem;
+        border-bottom: 1px solid var(--p-border);
+    }
+}
+
+.about-author::after {
+    content: '';
+    clear: both;
+    display: table;
+}
+
+.about-author-image {
+    figure {
+        position: relative;
+        width: 4em;
+    }
+    img{
+        border-radius: 50%;
+    }
+}
+
+@media (min-width: 40em){
+
+    .about-author-image {
+        float: left;
+        width: 16%;
+    }
+    .about-author-text {
+        float: right;
+        width: 84%;
+    }
+}

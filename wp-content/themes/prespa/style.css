@@ -1,0 +1,37 @@
+/*!
+Theme Name: Prespa
+Theme URI: https://nasiothemes.com/themes/prespa
+Author: Atanas Yonkov
+Author URI: https://nasiothemes.com/
+Description: Prespa is a next-generation multi-purpose WordPress theme. It is perfect for a blog, portfolio website, digital agency, marketing, seo, consulting, sass application website, e-commerce shop as well as any type of corporate, finance and agency website. You will be surprised how many options this generous theme provides. At the same time, a serious effort has been made to optimize the theme for speed. No Jquery, Bootstrap, Font Awesome or any other third-party library to slow you down - it uses only core WordPress functions and clean html5/css3 tempates. With our beautiful block patterns, you will be able to get started in minutes. No coding skills needed. A lot of time and effort has been spent to optimize the theme for SEO and it uses Schema.org markup (microdata) to help you rank higher in the search results. The theme is highly customizable and easy to adapt to any design. All theme demos have been made with the Gutenberg editor, which means you do not have to install any additional plugins to use the theme. At the same time, the theme also fully supports the good old Classic editor. Effortless integrations with all the popular WordPress plugins, e.g. WooCommerce is also fully guaranteed. The theme is specifically designed to make your content stand out from the crowd and it is very well thought in terms of UX/UI. Protect your visitors' eyes by allowing them to switch between day and night mode (light and dark mode) with a single click. Oh, and just like with our other themes, updates will keep on coming, constantly improving the codebase and keeping it up to date to the modern web standards. Still not convinved? Check the theme demo at https://prespa-demo.nasiothemes.com/ Theme documentation: https://nasiothemes.com/prespa-theme-documentation/
+Version: 1.6.8
+Requires at least: 6.1
+Tested up to: 6.8
+Requires PHP: 5.6
+License: GNU General Public License v2 or later
+License URI: http://www.gnu.org/licenses/gpl-2.0.html
+Text Domain: prespa
+Tags: blog, news, e-commerce, one-column, two-columns, three-columns, four-columns, grid-layout, right-sidebar, left-sidebar, block-patterns, wide-blocks, custom-colors, custom-header, custom-logo, custom-menu, featured-image-header, featured-images, footer-widgets, full-width-template, rtl-language-support, sticky-post, theme-options, threaded-comments, translation-ready
+
+This theme, like WordPress, is licensed under the GPL.
+It is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+Prespa is based on Underscores https://underscores.me/, (C) 2012-2020 Automattic, Inc.
+Underscores is distributed under the terms of the GNU GPL v2 or later.
+
+Normalizing styles have been helped along thanks to the fine work of
+Nicolas Gallagher and Jonathan Neal https://necolas.github.io/normalize.css/
+*/
+
+/**
+ * This file is here to make WordPress happy. Do not modify.
+ *
+ * The actual stylesheets can be found in build folder but this
+ * theme uses Webpack so they are preprocessed from assets/scss.
+ *
+ * If you want to add custom css to this theme, go to
+ * Theme Customizer => Additional CSS tab
+ */

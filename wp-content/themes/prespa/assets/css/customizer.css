@@ -1,0 +1,15 @@
+.customize-partial-edit-shortcut button {
+	left: -18px;
+}
+
+.customize-partial-edit-shortcut-header_background_position {
+    left: 2rem;
+}
+
+.header-image-wrapper.customize-partial-refreshing {
+    opacity: 1;
+}
+
+.slider-container.customize-partial-refreshing {
+    opacity: 1;
+}

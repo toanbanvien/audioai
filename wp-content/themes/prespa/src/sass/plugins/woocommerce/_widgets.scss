@@ -1,0 +1,160 @@
+/**
+ * WooCommerce Price Filter
+ */
+.woocommerce {
+
+	.widget_price_filter {
+
+		.price_slider {
+			margin-bottom: 1.5em;
+		}
+
+		.price_slider_amount {
+			text-align: right;
+			line-height: 2.4;
+
+			.button {
+				float: left;
+			}
+		}
+
+		.ui-slider {
+			position: relative;
+			text-align: left;
+		}
+
+		.ui-slider .ui-slider-handle {
+			position: absolute;
+			z-index: 2;
+			width: 1em;
+			height: 1em;
+			cursor: ew-resize;
+			outline: none;
+			background: #d3d3d3;
+			box-sizing: border-box;
+			border-radius: 2px;
+			opacity: 1;
+
+			&:last-child {
+				margin-left: -1em;
+			}
+
+			&:hover,
+			&.ui-state-active {
+				box-shadow: 0 0 0 0.25em rgba(#000, 0.1);
+			}
+		}
+
+		.ui-slider .ui-slider-range {
+			position: absolute;
+			z-index: 1;
+			display: block;
+			border: 0;
+		}
+
+		.price_slider_wrapper .ui-widget-content {
+			background: rgba(0, 0, 0, 0.1);
+		}
+
+		.ui-slider-horizontal {
+			height: 0.5em;
+		}
+
+		.ui-slider-horizontal .ui-slider-range {
+			height: 100%;
+			background-color: #404040;
+		}
+	}
+
+}
+
+.woocommerce {
+
+	aside {
+
+		.widget-title {
+			font-size: 20px;
+		}
+
+		.wp-block-search {
+
+			&__input {
+				height: 50px;
+			}
+
+			&__button {
+				margin-left: 0.25rem;
+			}
+		}
+	}
+}
+
+/* Cart Widget */
+.shopping-cart-additional-info {
+	display: none;
+}
+
+.shopping-cart-additional-info  .widget_shopping_cart {
+	margin: 0;
+
+	.buttons {
+		margin: 0;
+	}
+
+	.button {
+		width: auto;
+	}
+}
+
+.site-menu .widget_shopping_cart {
+	position: absolute;
+	z-index: 9999;
+	background-color: #fff;
+	border: 1px solid #ddd;
+	box-shadow: 0 2px 12px rgba(0, 0, 0, 0.15);
+	padding: 1rem;
+	overflow-y: auto;
+	width: 300px;
+	left: -1rem;
+}
+
+.site-menu {
+	.widget_shopping_cart {
+	
+		.total {
+			border-top: 0;
+			strong {
+				padding-top: .75rem;
+			}
+		}
+		.cart_list li:last-child {
+			padding-bottom: .75rem;
+			border-bottom: 3px double var(--p-border);
+		}
+	}
+}
+
+.site-menu .product_list_widget {
+	position: relative;
+	left: auto;
+	float: none;
+	box-shadow: none;
+
+	a {
+		background-color: transparent;
+		border: 0;
+	}
+}
+
+@media (min-width: 54rem) {
+
+	.shopping-cart-additional-info {
+		display: block;
+	}
+
+	.site-menu {
+		.cart-contents-count {
+			display: flex;
+		}
+	}
+}

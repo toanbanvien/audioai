@@ -1,0 +1,169 @@
+.featured-content-wrapper {
+	margin: auto;
+}
+
+.featured-content {
+	padding-bottom: 1rem;
+}
+
+.featured-element {
+
+	img {
+		width: 100%;
+		height: 100%;
+	}
+
+	> a {
+		position: relative;
+		display: inline-block;
+		overflow: hidden;
+		width: 100%;
+
+		&::before {
+			content: "";
+			position: absolute;
+			top: 3px;
+			right: 3px;
+			bottom: 28px;
+			left: 3px;
+			border: 2px solid rgba(255, 255, 255, 0.75);
+			border-radius: 4px;
+			z-index: 1;
+		}
+
+		&:hover {
+
+			img {
+				transform: translate(0%, 0%) scale3d(1.1, 1.1, 1.1);
+				opacity: 0.75;
+			}
+		}
+	}
+
+	figure {
+		display: inline-block;
+		overflow: hidden;
+		line-height: 0;
+		width: 100%;
+	}
+
+	img {
+		transition: all 0.8s ease-in-out;
+	}
+
+	img,
+	.fallback-svg {
+		border-radius: 4px;
+		object-fit: cover;
+		width: 100%;
+		height: 280px;
+	}
+
+	.inner {
+		margin-top: -0.5rem;
+
+		.title {
+			margin-top: .5rem;
+		}
+	}
+}
+
+.related-posts {
+	.featured-element {
+		padding-bottom: 2rem;
+	}
+}
+
+@media (min-width: 30rem) {
+
+	.missed-posts-section, .related-posts {
+		.featured-element {
+			padding-bottom: 1rem;
+		}
+	}
+
+	.featured-content {
+		display: flex;
+		gap: 2rem;
+		flex-wrap: wrap;
+	}
+
+	.featured-element {
+		flex: 0 0 45%;
+		margin-bottom: 0;
+	}
+
+	.featured-element img,
+	.featured-element .fallback-svg {
+		width: 100%;
+		height: 200px;
+	}
+}
+
+// @media (min-width: 40rem) {
+// 	.featured-element {
+// 		flex: 0 0 47.35%;
+// 	}
+// }
+
+// @media (min-width: 54rem) {
+
+// 	.featured-element {
+// 		flex: 0 0 30.75%;
+// 	}
+// }
+
+// @media (min-width: 60rem) {
+
+// 	.featured-element {
+// 		flex: 0 0 22.35%;
+// 	}
+// }
+
+// @media (min-width: 65rem) {
+
+// 	.featured-element {
+// 		flex: 0 0 22.6%;
+// 	}
+// }
+
+// @media (min-width: 71rem) {
+
+// 	.featured-element {
+// 		flex: 0 0 22.8%;
+// 	}
+// }
+
+// @media (min-width: 75rem) {
+
+// 	.featured-element {
+// 		flex: 0 0 22.95%;
+// 	}
+// }
+
+
+
+
+
+@media (min-width: 40rem) and (max-width: 60rem) {
+
+	.has-sidebar {
+
+		.related-posts {
+
+			.related-post {
+				flex: 0 0 45%;
+			}
+		}
+	}
+}
+
+@media (min-width: 60rem) {
+
+	.related-posts {
+
+		.related-post {
+			flex: 0 0 30%;
+		}
+	}
+}

@@ -1,0 +1,10 @@
+.absolute {
+	position: absolute;
+}
+
+@media (max-width: 54rem) {
+
+	.reorder-first {
+		order: -1;
+	}
+}
