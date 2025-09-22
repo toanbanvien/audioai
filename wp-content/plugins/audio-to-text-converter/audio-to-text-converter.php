@@ -2,7 +2,7 @@
 /*
 Plugin Name: Audio to Text Converter
 Description: Chuyển đổi file ghi âm thành văn bản tiếng Việt sử dụng OpenAI API (Whisper). Giới hạn thời lượng 2 phút.
-Version: 1.0.2
+Version: 1.0.4
 Author: Cascade AI
 */
 
@@ -13,6 +13,11 @@ if (!defined('ABSPATH')) {
 // ===== Khởi tạo plugin =====
 function attc_init() {
     add_shortcode('audio_to_text_form', 'attc_display_form');
+    // Shortcodes front-end đăng nhập/đăng ký
+    add_shortcode('attc_login_form', 'attc_login_form');
+    add_shortcode('attc_register_form', 'attc_register_form');
+    // Shortcode lịch sử chuyển đổi
+    add_shortcode('attc_history', 'attc_history_shortcode');
 
     // Xử lý submit (frontend)
     add_action('admin_post_attc_process_audio', 'attc_process_audio');
@@ -21,8 +26,67 @@ function attc_init() {
     // Endpoint tải file Word (.doc)
     add_action('admin_post_attc_download_doc', 'attc_download_doc');
     add_action('admin_post_nopriv_attc_download_doc', 'attc_download_doc');
+
+    // Handlers cho login/đăng ký front-end
+    add_action('admin_post_nopriv_attc_do_login', 'attc_do_login');
+    add_action('admin_post_nopriv_attc_do_register', 'attc_do_register');
+
+    // Đảm bảo hai trang front-end luôn tồn tại (nếu bị xóa nhầm)
+    add_action('init', 'attc_maybe_create_frontend_pages', 20);
+
+    // Enqueue script reCAPTCHA nếu đã cấu hình key
+    add_action('wp_enqueue_scripts', 'attc_enqueue_recaptcha_script');
 }
 add_action('init', 'attc_init');
+
+// Enqueue script Google reCAPTCHA v2 nếu site key/secret đã cấu hình
+function attc_enqueue_recaptcha_script() {
+    $site_key   = get_option('attc_recaptcha_site_key', '');
+    $secret_key = get_option('attc_recaptcha_secret_key', '');
+    if (is_admin()) return;
+    if (empty($site_key) || empty($secret_key)) return;
+    // Chỉ enqueue ở frontend
+    wp_enqueue_script('google-recaptcha', 'https://www.google.com/recaptcha/api.js', [], null, true);
+}
+
+// Tạo lại trang front-end đăng nhập/đăng ký nếu thiếu
+function attc_maybe_create_frontend_pages() {
+    $created = false;
+    if (!get_page_by_path('dang-nhap')) {
+        wp_insert_post([
+            'post_title'   => 'Đăng nhập',
+            'post_name'    => 'dang-nhap',
+            'post_status'  => 'publish',
+            'post_type'    => 'page',
+            'post_content' => '[attc_login_form]'
+        ]);
+        $created = true;
+    }
+    if (!get_page_by_path('dang-ky')) {
+        wp_insert_post([
+            'post_title'   => 'Đăng ký',
+            'post_name'    => 'dang-ky',
+            'post_status'  => 'publish',
+            'post_type'    => 'page',
+            'post_content' => '[attc_register_form]'
+        ]);
+        $created = true;
+    }
+    if (!get_page_by_path('lich-su-chuyen-doi')) {
+        wp_insert_post([
+            'post_title'   => 'Lịch sử chuyển đổi',
+            'post_name'    => 'lich-su-chuyen-doi',
+            'post_status'  => 'publish',
+            'post_type'    => 'page',
+            'post_content' => '[attc_history]'
+        ]);
+        $created = true;
+    }
+    // Nếu vừa tạo trang mới, flush rewrite để tránh 404 ngay lập tức
+    if ($created) {
+        flush_rewrite_rules(false);
+    }
+}
 
 // ===== Hiển thị form upload =====
 function attc_display_form() {
@@ -30,6 +94,44 @@ function attc_display_form() {
     ?>
     <div class="audio-to-text-converter">
         <h2>Chuyển đổi giọng nói thành văn bản</h2>
+
+        <?php if (is_user_logged_in()): ?>
+            <nav class="attc-top-nav">
+                <a class="attc-nav-link" href="<?php echo esc_url(home_url('/lich-su-chuyen-doi/')); ?>">Lịch sử chuyển đổi</a>
+                <a class="attc-nav-link" href="<?php echo esc_url(wp_logout_url(home_url('/chuyen-doi-giong-noi/'))); ?>">Đăng xuất</a>
+            </nav>
+        <?php endif; ?>
+
+        <?php
+        // Nếu chưa đăng nhập: hiển thị thông báo + nút đăng nhập/đăng ký và dừng tại đây
+        if (!is_user_logged_in()) {
+            // Lấy permalink chính xác của trang front-end (an toàn hơn khi cấu trúc link khác)
+            $redirect_to = home_url('/chuyen-doi-giong-noi/');
+            $login_page = get_page_by_path('dang-nhap');
+            $register_page = get_page_by_path('dang-ky');
+            $login_url = $login_page ? get_permalink($login_page) : home_url('/dang-nhap/');
+            $register_url = $register_page ? get_permalink($register_page) : home_url('/dang-ky/');
+            // Gắn redirect_to để quay lại trang chuyển đổi sau khi đăng nhập/đăng ký
+            $login_url = add_query_arg('redirect_to', rawurlencode($redirect_to), $login_url);
+            $register_url = add_query_arg('redirect_to', rawurlencode($redirect_to), $register_url);
+            echo '<div class="attc-alert attc-alert-error">Bạn cần đăng nhập để sử dụng chức năng tải lên và chuyển đổi.</div>';
+            echo '<p class="attc-auth-actions">'
+               . '<a class="attc-login-btn" href="' . esc_url($login_url) . '">Đăng nhập</a>'
+               . '<a class="attc-register-btn" href="' . esc_url($register_url) . '">Đăng ký</a>'
+               . '</p>';
+            echo '</div>';
+            ?>
+            <style>
+                .attc-auth-actions{display:flex; gap:10px; margin:12px 0 4px}
+                .attc-login-btn{display:inline-block; background:#2271b1; color:#fff !important; padding:10px 14px; border-radius:4px; text-decoration:none; font-weight:600}
+                .attc-login-btn:hover{background:#1b5c8f}
+                .attc-register-btn{display:inline-block; background:#6c757d; color:#fff !important; padding:10px 14px; border-radius:4px; text-decoration:none; font-weight:600}
+                .attc-register-btn:hover{background:#5a6268}
+            </style>
+            <?php
+            return ob_get_clean();
+        }
+        ?>
 
         <?php if (isset($_GET['attc_error'])): ?>
             <div class="attc-alert attc-alert-error"><?php echo esc_html(urldecode(sanitize_text_field($_GET['attc_error']))); ?></div>
@@ -87,6 +189,9 @@ function attc_display_form() {
         .attc-download-btn {display:inline-flex; align-items:center; gap:8px; background:#28a745; border:1px solid #1e7e34; padding:10px 14px; border-radius:4px; color:#fff !important; text-decoration:none; font-weight:600;}
         .attc-download-btn:hover {background:#218838; border-color:#1c7430;}
         .attc-download-btn svg {width:16px; height:16px; fill: currentColor;}
+        .attc-top-nav{display:flex; gap:12px; margin:8px 0 16px}
+        .attc-nav-link{display:inline-block; padding:8px 12px; border:1px solid #cfd4d9; border-radius:6px; text-decoration:none; color:#2271b1}
+        .attc-nav-link:hover{background:#f3f6f9}
     </style>
 
     <script>
@@ -154,6 +259,12 @@ function attc_display_form() {
 function attc_process_audio() {
     if (!isset($_POST['attc_nonce']) || !wp_verify_nonce($_POST['attc_nonce'], 'attc_upload_nonce')) {
         wp_redirect(add_query_arg('attc_error', urlencode('Lỗi bảo mật. Vui lòng thử lại.'), wp_get_referer()));
+        exit;
+    }
+
+    // Chặn phía server nếu chưa đăng nhập
+    if (!is_user_logged_in()) {
+        wp_redirect(add_query_arg('attc_error', urlencode('Vui lòng đăng nhập để tải lên và chuyển đổi.'), wp_get_referer()));
         exit;
     }
 
@@ -226,6 +337,11 @@ function attc_process_audio() {
         if (!is_wp_error($polished) && !empty($polished)) {
             $final_text = $polished;
         }
+    }
+
+    // Lưu lịch sử cho người dùng (nếu đã đăng nhập)
+    if (is_user_logged_in()) {
+        attc_add_history(get_current_user_id(), $final_text);
     }
 
     // Tạo token tạm để tải file .doc và redirect kèm token
@@ -360,6 +476,82 @@ function attc_postprocess_text($text) {
 }
 endif;
 
+// ===== Lịch sử chuyển đổi =====
+function attc_add_history($user_id, $text) {
+    $key = 'attc_history';
+    $history = get_user_meta($user_id, $key, true);
+    if (!is_array($history)) $history = [];
+    $history[] = [
+        'time' => time(),
+        'text' => $text,
+    ];
+    // Giới hạn 50 mục gần nhất
+    if (count($history) > 50) {
+        $history = array_slice($history, -50);
+    }
+    update_user_meta($user_id, $key, $history);
+}
+
+function attc_history_shortcode() {
+    if (!is_user_logged_in()) {
+        return '<div class="attc-alert attc-alert-error">Vui lòng đăng nhập để xem lịch sử.</div>';
+    }
+    $user_id = get_current_user_id();
+    $history = get_user_meta($user_id, 'attc_history', true);
+    if (!is_array($history) || empty($history)) {
+        return '<div class="attc-alert attc-alert-success">Chưa có lịch sử chuyển đổi.</div>';
+    }
+
+    // Render danh sách, mới nhất trước
+    $items = array_reverse($history);
+    ob_start();
+    ?>
+    <div class="attc-history">
+        <h2>Lịch sử chuyển đổi</h2>
+        <div class="attc-top-nav" style="margin-top:0;">
+            <a class="attc-nav-link" href="<?php echo esc_url(home_url('/chuyen-doi-giong-noi/')); ?>">Quay lại chuyển đổi</a>
+            <a class="attc-nav-link" href="<?php echo esc_url(wp_logout_url(home_url('/chuyen-doi-giong-noi/'))); ?>">Đăng xuất</a>
+        </div>
+        <ul class="attc-history-list">
+            <?php foreach ($items as $idx => $entry):
+                $ts = isset($entry['time']) ? intval($entry['time']) : time();
+                $text = isset($entry['text']) ? (string)$entry['text'] : '';
+                // Tạo link tải .doc bằng transient tức thời
+                $token = wp_generate_uuid4();
+                set_transient('attc_doc_' . $token, $text, 10 * MINUTE_IN_SECONDS);
+                $download_url = wp_nonce_url(
+                    add_query_arg([
+                        'action' => 'attc_download_doc',
+                        'token'  => $token,
+                    ], admin_url('admin-post.php')),
+                    'attc_download_' . $token
+                );
+            ?>
+            <li class="attc-history-item">
+                <div class="attc-history-meta">
+                    <span class="attc-history-time"><?php echo esc_html(date_i18n('d/m/Y H:i', $ts)); ?></span>
+                    <a class="attc-download-btn" href="<?php echo esc_url($download_url); ?>">Tải .doc</a>
+                </div>
+                <details>
+                    <summary>Xem nội dung</summary>
+                    <div class="attc-history-content"><?php echo nl2br(esc_html($text)); ?></div>
+                </details>
+            </li>
+            <?php endforeach; ?>
+        </ul>
+    </div>
+    <style>
+        .attc-history{max-width:860px;margin:0 auto;padding:20px}
+        .attc-history-list{list-style:none; padding:0; margin:0}
+        .attc-history-item{border:1px solid #e5e7eb; border-radius:8px; padding:12px 14px; margin:12px 0; background:#fff}
+        .attc-history-meta{display:flex; gap:10px; align-items:center; justify-content:space-between}
+        .attc-history-time{color:#555}
+        .attc-history-content{white-space:pre-wrap; margin-top:8px}
+    </style>
+    <?php
+    return ob_get_clean();
+}
+
 // ===== Tải kết quả về file Word (.doc) =====
 if (!function_exists('attc_download_doc')):
 function attc_download_doc() {
@@ -389,6 +581,211 @@ function attc_download_doc() {
     exit;
 }
 endif;
+
+// ===== Shortcode: Form đăng nhập front-end =====
+function attc_login_form() {
+    if (is_user_logged_in()) {
+        return '<div class="attc-alert attc-alert-success">Bạn đã đăng nhập.</div>';
+    }
+    $redirect = isset($_GET['redirect_to']) ? esc_url_raw($_GET['redirect_to']) : home_url('/chuyen-doi-giong-noi/');
+    $site_key = get_option('attc_recaptcha_site_key', '');
+    ob_start();
+    ?>
+    <div class="attc-auth-form attc-card">
+        <h2 class="attc-card__title">Đăng nhập</h2>
+         <?php if (isset($_GET['attc_error'])): ?>
+             <div class="attc-alert attc-alert-error"><?php echo esc_html(urldecode(sanitize_text_field($_GET['attc_error']))); ?></div>
+         <?php endif; ?>
+         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+             <input type="hidden" name="action" value="attc_do_login">
+             <?php wp_nonce_field('attc_login_nonce', 'attc_login'); ?>
+             <input type="hidden" name="redirect_to" value="<?php echo esc_attr($redirect); ?>">
+             <p class="attc-field"><label>Tên đăng nhập hoặc Email</label><input class="attc-input" type="text" name="log" required></p>
+             <p class="attc-field"><label>Mật khẩu</label><input class="attc-input" type="password" name="pwd" required></p>
+             <p class="attc-field attc-field--inline"><label><input type="checkbox" name="rememberme" value="1"> Ghi nhớ đăng nhập</label></p>
+             <?php if (!empty($site_key)) : ?>
+                 <div class="g-recaptcha" data-sitekey="<?php echo esc_attr($site_key); ?>"></div>
+             <?php endif; ?>
+             <p><button type="submit" class="button button-primary attc-btn-wide">Đăng nhập</button></p>
+         </form>
+         <p class="attc-card__footer">Chưa có tài khoản? <a href="<?php echo esc_url(home_url('/dang-ky/')); ?>">Đăng ký</a></p>
+     </div>
+     <?php if (!empty($site_key)) : ?>
+     <script src="https://www.google.com/recaptcha/api.js" async defer></script>
+     <?php endif; ?>
+     <style>
+         .attc-card{max-width:520px;margin:24px auto;padding:24px 20px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.04)}
+         .attc-card__title{margin:0 0 12px;font-size:20px}
+         .attc-card__footer{margin-top:12px;color:#555}
+         .attc-field{margin:12px 0}
+         .attc-field label{display:block;margin-bottom:6px;font-weight:600}
+         .attc-input{width:100%;padding:10px 12px;border:1px solid #cfd4d9;border-radius:6px;outline:none}
+         .attc-input:focus{border-color:#2271b1;box-shadow:0 0 0 3px rgba(34,113,177,.15)}
+         .attc-btn-wide{width:100%;padding:10px 14px}
+         .g-recaptcha{margin:10px 0}
+     </style>
+     <?php
+     return ob_get_clean();
+ }
+
+// ===== Shortcode: Form đăng ký front-end =====
+function attc_register_form() {
+    if (is_user_logged_in()) {
+        return '<div class="attc-alert attc-alert-success">Bạn đã đăng nhập.</div>';
+    }
+    if (!get_option('users_can_register')) {
+        return '<div class="attc-alert attc-alert-error">Trang web hiện đang tạm tắt chức năng đăng ký.</div>';
+    }
+    $redirect = isset($_GET['redirect_to']) ? esc_url_raw($_GET['redirect_to']) : home_url('/chuyen-doi-giong-noi/');
+    $site_key = get_option('attc_recaptcha_site_key', '');
+    ob_start();
+    ?>
+    <div class="attc-auth-form attc-card">
+        <h2 class="attc-card__title">Đăng ký</h2>
+         <?php if (isset($_GET['attc_error'])): ?>
+             <div class="attc-alert attc-alert-error"><?php echo esc_html(urldecode(sanitize_text_field($_GET['attc_error']))); ?></div>
+         <?php endif; ?>
+         <?php if (empty($site_key) && current_user_can('manage_options')): ?>
+             <div class="attc-alert attc-alert-error">Chưa cấu hình reCAPTCHA Site Key/Secret trong Cài đặt > Audio to Text. reCAPTCHA sẽ không hiển thị cho đến khi cấu hình.</div>
+         <?php endif; ?>
+         <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+             <input type="hidden" name="action" value="attc_do_register">
+             <?php wp_nonce_field('attc_register_nonce', 'attc_register'); ?>
+             <input type="hidden" name="redirect_to" value="<?php echo esc_attr($redirect); ?>">
+             <p class="attc-field"><label>Tên đăng nhập</label><input class="attc-input" type="text" name="user_login" required></p>
+             <p class="attc-field"><label>Email</label><input class="attc-input" type="email" name="user_email" required></p>
+             <p class="attc-field"><label>Mật khẩu</label><input class="attc-input" type="password" name="user_pass" required></p>
+             <p class="attc-field"><label>Xác nhận mật khẩu</label><input class="attc-input" type="password" name="user_pass2" required></p>
+             <?php if (!empty($site_key)) : ?>
+                 <div class="g-recaptcha" data-sitekey="<?php echo esc_attr($site_key); ?>"></div>
+             <?php endif; ?>
+             <p><button type="submit" class="button button-primary attc-btn-wide">Đăng ký</button></p>
+         </form>
+         <p class="attc-card__footer">Đã có tài khoản? <a href="<?php echo esc_url(home_url('/dang-nhap/')); ?>">Đăng nhập</a></p>
+     </div>
+     <?php if (!empty($site_key)) : ?>
+     <script src="https://www.google.com/recaptcha/api.js" async defer></script>
+     <?php endif; ?>
+     <style>
+         .attc-card{max-width:520px;margin:24px auto;padding:24px 20px;background:#fff;border:1px solid #e5e7eb;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,.04)}
+         .attc-card__title{margin:0 0 12px;font-size:20px}
+         .attc-card__footer{margin-top:12px;color:#555}
+         .attc-field{margin:12px 0}
+         .attc-field label{display:block;margin-bottom:6px;font-weight:600}
+         .attc-input{width:100%;padding:10px 12px;border:1px solid #cfd4d9;border-radius:6px;outline:none}
+         .attc-input:focus{border-color:#2271b1;box-shadow:0 0 0 3px rgba(34,113,177,.15)}
+         .attc-btn-wide{width:100%;padding:10px 14px}
+         .g-recaptcha{margin:10px 0}
+     </style>
+     <?php
+     return ob_get_clean();
+ }
+
+// ===== Handler: Đăng nhập =====
+function attc_do_login() {
+    if (!isset($_POST['attc_login']) || !wp_verify_nonce($_POST['attc_login'], 'attc_login_nonce')) {
+        wp_redirect(add_query_arg('attc_error', urlencode('Yêu cầu không hợp lệ.'), wp_get_referer()));
+        exit;
+    }
+    // reCAPTCHA (nếu được cấu hình)
+    if (!attc_verify_recaptcha_if_configured()) {
+        wp_redirect(add_query_arg('attc_error', urlencode('Vui lòng xác nhận CAPTCHA.'), wp_get_referer()));
+        exit;
+    }
+    $creds = [
+        'user_login'    => sanitize_text_field($_POST['log'] ?? ''),
+        'user_password' => $_POST['pwd'] ?? '',
+        'remember'      => !empty($_POST['rememberme']),
+    ];
+    $user = wp_signon($creds, is_ssl());
+    $redirect = !empty($_POST['redirect_to']) ? esc_url_raw($_POST['redirect_to']) : home_url('/chuyen-doi-giong-noi/');
+    if (is_wp_error($user)) {
+        wp_redirect(add_query_arg('attc_error', urlencode($user->get_error_message()), wp_get_referer()));
+        exit;
+    }
+    wp_redirect($redirect);
+    exit;
+}
+
+// ===== Handler: Đăng ký (tự đăng nhập sau khi tạo tài khoản) =====
+function attc_do_register() {
+    if (!isset($_POST['attc_register']) || !wp_verify_nonce($_POST['attc_register'], 'attc_register_nonce')) {
+        wp_redirect(add_query_arg('attc_error', urlencode('Yêu cầu không hợp lệ.'), wp_get_referer()));
+        exit;
+    }
+    // Kiểm tra xác nhận mật khẩu
+    $pass  = $_POST['user_pass'] ?? '';
+    $pass2 = $_POST['user_pass2'] ?? '';
+    if ($pass !== $pass2) {
+        wp_redirect(add_query_arg('attc_error', urlencode('Mật khẩu xác nhận không khớp.'), wp_get_referer()));
+        exit;
+    }
+    // reCAPTCHA (nếu được cấu hình)
+    if (!attc_verify_recaptcha_if_configured()) {
+        wp_redirect(add_query_arg('attc_error', urlencode('Vui lòng xác nhận CAPTCHA.'), wp_get_referer()));
+        exit;
+    }
+    if (!get_option('users_can_register')) {
+        wp_redirect(add_query_arg('attc_error', urlencode('Trang web hiện không cho phép đăng ký.'), wp_get_referer()));
+        exit;
+    }
+    $username = sanitize_user($_POST['user_login'] ?? '');
+    $email    = sanitize_email($_POST['user_email'] ?? '');
+    // $pass đã lấy ở trên
+    if (empty($username) || empty($email) || empty($pass)) {
+        wp_redirect(add_query_arg('attc_error', urlencode('Vui lòng điền đủ thông tin.'), wp_get_referer()));
+        exit;
+    }
+    if (username_exists($username) || email_exists($email)) {
+        wp_redirect(add_query_arg('attc_error', urlencode('Tên đăng nhập hoặc email đã tồn tại.'), wp_get_referer()));
+        exit;
+    }
+    $user_id = wp_create_user($username, $pass, $email);
+    if (is_wp_error($user_id)) {
+        wp_redirect(add_query_arg('attc_error', urlencode($user_id->get_error_message()), wp_get_referer()));
+        exit;
+    }
+    // Gán vai trò mặc định
+    $user = new WP_User($user_id);
+    $user->set_role(get_option('default_role', 'subscriber'));
+
+    // Tự đăng nhập
+    $signed = wp_signon([
+        'user_login'    => $username,
+        'user_password' => $pass,
+        'remember'      => true,
+    ], is_ssl());
+    $redirect = !empty($_POST['redirect_to']) ? esc_url_raw($_POST['redirect_to']) : home_url('/chuyen-doi-giong-noi/');
+    if (is_wp_error($signed)) {
+        wp_redirect(add_query_arg('attc_error', urlencode($signed->get_error_message()), wp_get_referer()));
+        exit;
+    }
+    wp_redirect($redirect);
+    exit;
+}
+
+// ===== reCAPTCHA helpers =====
+function attc_verify_recaptcha_if_configured() {
+    $site_key   = get_option('attc_recaptcha_site_key', '');
+    $secret_key = get_option('attc_recaptcha_secret_key', '');
+    if (empty($site_key) || empty($secret_key)) {
+        return true; // chưa cấu hình => bỏ qua
+    }
+    $response = isset($_POST['g-recaptcha-response']) ? sanitize_text_field($_POST['g-recaptcha-response']) : '';
+    if (empty($response)) return false;
+    $verify = wp_remote_post('https://www.google.com/recaptcha/api/siteverify', [
+        'body' => [
+            'secret'   => $secret_key,
+            'response' => $response,
+            'remoteip' => $_SERVER['REMOTE_ADDR'] ?? '',
+        ],
+        'timeout' => 15,
+    ]);
+    if (is_wp_error($verify)) return false;
+    $data = json_decode(wp_remote_retrieve_body($verify), true);
+    return !empty($data['success']);
+}
+
 // ===== Trang cài đặt trong Admin =====
 function attc_add_admin_menu() {
     add_options_page(
@@ -407,10 +804,14 @@ function attc_options_page() {
             wp_die('Lỗi bảo mật. Vui lòng thử lại.');
         }
         update_option('attc_openai_api_key', sanitize_text_field($_POST['attc_openai_api_key'] ?? ''));
+        update_option('attc_recaptcha_site_key', sanitize_text_field($_POST['attc_recaptcha_site_key'] ?? ''));
+        update_option('attc_recaptcha_secret_key', sanitize_text_field($_POST['attc_recaptcha_secret_key'] ?? ''));
         add_settings_error('attc_messages', 'attc_saved', 'Cài đặt đã được lưu.', 'updated');
     }
 
     $openai_api_key = get_option('attc_openai_api_key', '');
+    $recaptcha_site_key = get_option('attc_recaptcha_site_key', '');
+    $recaptcha_secret_key = get_option('attc_recaptcha_secret_key', '');
     ?>
     <div class="wrap">
         <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
@@ -423,6 +824,19 @@ function attc_options_page() {
                     <td>
                         <input type="password" id="attc_openai_api_key" name="attc_openai_api_key" class="regular-text" value="<?php echo esc_attr($openai_api_key); ?>" required>
                         <p class="description">Lấy API key tại <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener">OpenAI</a>.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_recaptcha_site_key">reCAPTCHA Site Key</label></th>
+                    <td>
+                        <input type="text" id="attc_recaptcha_site_key" name="attc_recaptcha_site_key" class="regular-text" value="<?php echo esc_attr($recaptcha_site_key); ?>">
+                        <p class="description">Tạo khóa tại <a href="https://www.google.com/recaptcha/admin/create" target="_blank" rel="noopener">Google reCAPTCHA</a> (chọn v2 Checkbox).</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_recaptcha_secret_key">reCAPTCHA Secret Key</label></th>
+                    <td>
+                        <input type="password" id="attc_recaptcha_secret_key" name="attc_recaptcha_secret_key" class="regular-text" value="<?php echo esc_attr($recaptcha_secret_key); ?>">
                     </td>
                 </tr>
             </table>
@@ -474,6 +888,35 @@ function attc_activate() {
             'post_status'  => 'publish',
             'post_type'    => 'page',
             'post_content' => '[audio_to_text_form]'
+        ]);
+    }
+
+    // Tạo trang đăng nhập/đăng ký front-end nếu chưa có
+    if (!get_page_by_path('dang-nhap')) {
+        wp_insert_post([
+            'post_title'   => 'Đăng nhập',
+            'post_name'    => 'dang-nhap',
+            'post_status'  => 'publish',
+            'post_type'    => 'page',
+            'post_content' => '[attc_login_form]'
+        ]);
+    }
+    if (!get_page_by_path('dang-ky')) {
+        wp_insert_post([
+            'post_title'   => 'Đăng ký',
+            'post_name'    => 'dang-ky',
+            'post_status'  => 'publish',
+            'post_type'    => 'page',
+            'post_content' => '[attc_register_form]'
+        ]);
+    }
+    if (!get_page_by_path('lich-su-chuyen-doi')) {
+        wp_insert_post([
+            'post_title'   => 'Lịch sử chuyển đổi',
+            'post_name'    => 'lich-su-chuyen-doi',
+            'post_status'  => 'publish',
+            'post_type'    => 'page',
+            'post_content' => '[attc_history]'
         ]);
     }
 }
