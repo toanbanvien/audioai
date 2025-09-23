@@ -33,6 +33,7 @@ function attc_init() {
 
     // Handlers cho login/đăng ký front-end
     add_action('admin_post_nopriv_attc_do_login', 'attc_do_login');
+    add_action('admin_post_attc_do_login', 'attc_do_login');
     add_action('admin_post_nopriv_attc_do_register', 'attc_do_register');
     // Handler quên mật khẩu
     add_action('admin_post_nopriv_attc_do_forgot', 'attc_do_forgot');
@@ -132,6 +133,62 @@ function attc_display_form() {
         <?php endif; ?>
 
         <?php
+        // Banner tài khoản: nếu đã đăng nhập, hiển thị email nổi bật trên đầu trang chuyển đổi
+        if (is_user_logged_in()) {
+            $cu = wp_get_current_user();
+            if (!empty($cu->user_email)) {
+                echo '<div class="attc-account-banner">Tài khoản: <strong>' . esc_html($cu->user_email) . '</strong></div>';
+            }
+        }
+        ?>
+
+        <?php if (isset($_GET['attc_error'])): ?>
+            <div class="attc-alert attc-alert-error"><?php echo esc_html(urldecode(sanitize_text_field($_GET['attc_error']))); ?></div>
+        <?php endif; ?>
+
+        <?php if (isset($_GET['attc_result'])): ?>
+            <div class="attc-alert attc-alert-success">
+                <h3>Kết quả</h3>
+                <p><?php echo nl2br(esc_html(urldecode(sanitize_text_field($_GET['attc_result'])))); ?></p>
+                <?php
+                // Hiển thị nút tải file Word nếu có token
+                $token = isset($_GET['attc_token']) ? sanitize_text_field($_GET['attc_token']) : '';
+                if ($token) {
+                    $download_url = wp_nonce_url(
+                        add_query_arg([
+                            'action' => 'attc_download_doc',
+                            'token'  => $token,
+                        ], admin_url('admin-post.php')),
+                        'attc_download_' . $token
+                    );
+                    echo '<p><a class="attc-download-btn" href="' . esc_url($download_url) . '"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20h14a1 1 0 0 0 1-1v-3h-2v2H6v-2H4v3a1 1 0 0 0 1 1zm7-3l5-5h-3V4h-4v8H7l5 5z"></path></svg><span>Tải kết quả (.doc)</span></a></p>';
+                }
+                ?>
+            </div>
+        <?php endif; ?>
+
+        <?php
+        // Hiển thị số lượt còn lại trong ngày cho tài khoản miễn phí
+        if (is_user_logged_in()) {
+            $uid = get_current_user_id();
+            $quota_info = attc_get_daily_remaining($uid);
+            if (!$quota_info['unlimited']) {
+                if (intval($quota_info['remaining']) <= 0) {
+                    // Hết lượt => thông báo + nút nâng cấp và ẩn form
+                    echo '<div class="attc-alert attc-alert-error">Tài khoản miễn phí chỉ được tải lên 1 file ghi âm mỗi ngày. Vui lòng thử lại vào ngày mai.</div>';
+                    $upgrade_url = apply_filters('attc_upgrade_url', home_url('/nang-cap/'), $uid);
+                    echo '<p><a class="attc-login-btn" href="' . esc_url($upgrade_url) . '">Nâng cấp tài khoản</a></p>';
+                    // Dừng render form
+                    echo '</div>';
+                    return ob_get_clean();
+                } else {
+                    echo '<div class="attc-quota">Bạn còn ' . intval($quota_info['remaining']) . '/' . intval($quota_info['limit']) . ' lượt hôm nay.</div>';
+                }
+            }
+        }
+        ?>
+
+        <?php
         // Nếu chưa đăng nhập: hiển thị thông báo + nút đăng nhập/đăng ký và dừng tại đây
         if (!is_user_logged_in()) {
             // Lấy permalink chính xác của trang front-end (an toàn hơn khi cấu trúc link khác)
@@ -161,31 +218,6 @@ function attc_display_form() {
             return ob_get_clean();
         }
         ?>
-
-        <?php if (isset($_GET['attc_error'])): ?>
-            <div class="attc-alert attc-alert-error"><?php echo esc_html(urldecode(sanitize_text_field($_GET['attc_error']))); ?></div>
-        <?php endif; ?>
-
-        <?php if (isset($_GET['attc_result'])): ?>
-            <div class="attc-alert attc-alert-success">
-                <h3>Kết quả</h3>
-                <p><?php echo nl2br(esc_html(urldecode(sanitize_text_field($_GET['attc_result'])))); ?></p>
-                <?php
-                // Hiển thị nút tải file Word nếu có token
-                $token = isset($_GET['attc_token']) ? sanitize_text_field($_GET['attc_token']) : '';
-                if ($token) {
-                    $download_url = wp_nonce_url(
-                        add_query_arg([
-                            'action' => 'attc_download_doc',
-                            'token'  => $token,
-                        ], admin_url('admin-post.php')),
-                        'attc_download_' . $token
-                    );
-                    echo '<p><a class="attc-download-btn" href="' . esc_url($download_url) . '"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20h14a1 1 0 0 0 1-1v-3h-2v2H6v-2H4v3a1 1 0 0 0 1 1zm7-3l5-5h-3V4h-4v8H7l5 5z"></path></svg><span>Tải kết quả (.doc)</span></a></p>';
-                }
-                ?>
-            </div>
-        <?php endif; ?>
 
         <form method="post" enctype="multipart/form-data" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
             <input type="hidden" name="action" value="attc_process_audio">
@@ -221,6 +253,7 @@ function attc_display_form() {
         .attc-top-nav{display:flex; gap:12px; margin:8px 0 16px}
         .attc-nav-link{display:inline-block; padding:8px 12px; border:1px solid #cfd4d9; border-radius:6px; text-decoration:none; color:#2271b1}
         .attc-nav-link:hover{background:#f3f6f9}
+        .attc-quota{background:#f8fafc; border:1px solid #e5e7eb; color:#0f172a; padding:8px 12px; border-radius:6px; margin:8px 0 12px; font-size:14px}
     </style>
 
     <script>
@@ -294,6 +327,14 @@ function attc_process_audio() {
     // Chặn phía server nếu chưa đăng nhập
     if (!is_user_logged_in()) {
         wp_redirect(add_query_arg('attc_error', urlencode('Vui lòng đăng nhập để tải lên và chuyển đổi.'), wp_get_referer()));
+        exit;
+    }
+
+    // Giới hạn: mỗi user miễn phí chỉ được upload 1 file/ngày
+    $user_id = get_current_user_id();
+    $quota = attc_check_and_consume_daily_upload($user_id);
+    if (is_wp_error($quota)) {
+        wp_redirect(add_query_arg('attc_error', urlencode($quota->get_error_message()), wp_get_referer()));
         exit;
     }
 
@@ -537,6 +578,13 @@ function attc_history_shortcode() {
     ?>
     <div class="attc-history">
         <h2>Lịch sử chuyển đổi</h2>
+        <?php 
+        $current_user  = wp_get_current_user();
+        $current_email = isset($current_user->user_email) ? $current_user->user_email : '';
+        ?>
+        <?php if (!empty($current_email)) : ?>
+        <div class="attc-account-banner">Tài khoản: <strong><?php echo esc_html($current_email); ?></strong></div>
+        <?php endif; ?>
         <div class="attc-top-nav" style="margin-top:0;">
             <a class="attc-nav-link" href="<?php echo esc_url(home_url('/chuyen-doi-giong-noi/')); ?>">Quay lại chuyển đổi</a>
             <a class="attc-nav-link" href="<?php echo esc_url(wp_logout_url(home_url('/chuyen-doi-giong-noi/'))); ?>">Đăng xuất</a>
@@ -558,7 +606,7 @@ function attc_history_shortcode() {
             ?>
             <li class="attc-history-item">
                 <div class="attc-history-meta">
-                    <span class="attc-history-time"><?php echo esc_html(date_i18n('d/m/Y H:i', $ts)); ?></span>
+                    <span class="attc-history-time"><?php echo esc_html(wp_date('d/m/Y H:i', $ts)); ?></span>
                     <a class="attc-download-btn" href="<?php echo esc_url($download_url); ?>">Tải .doc</a>
                 </div>
                 <details>
@@ -576,6 +624,12 @@ function attc_history_shortcode() {
         .attc-history-meta{display:flex; gap:10px; align-items:center; justify-content:space-between}
         .attc-history-time{color:#555}
         .attc-history-content{white-space:pre-wrap; margin-top:8px}
+        /* Tăng khoảng cách và style cho hai nút điều hướng trên cùng */
+        .attc-top-nav{display:flex; gap:16px; margin:8px 0 16px; flex-wrap:wrap}
+        .attc-nav-link{display:inline-block; padding:8px 12px; border:1px solid #cfd4d9; border-radius:6px; text-decoration:none; color:#2271b1}
+        .attc-nav-link:hover{background:#f3f6f9}
+        /* Banner tài khoản đang đăng nhập */
+        .attc-account-banner{background:#fff7ed; border:1px solid #fed7aa; color:#7c2d12; padding:10px 12px; border-radius:6px; margin:8px 0 12px; font-weight:600}
     </style>
     <?php
     return ob_get_clean();
@@ -595,7 +649,7 @@ function attc_download_doc() {
         wp_die('Phiên tải xuống đã hết hạn hoặc không tồn tại.');
     }
 
-    $filename = 'chuyen-doi-' . date('Ymd-His') . '.doc';
+    $filename = 'chuyen-doi-' . wp_date('Ymd-His') . '.doc';
     header('Content-Type: application/msword; charset=UTF-8');
     header('Content-Disposition: attachment; filename=' . $filename);
     header('Cache-Control: no-cache, no-store, must-revalidate');
@@ -640,7 +694,7 @@ function attc_login_form() {
              <?php endif; ?>
              <p><button type="submit" class="button button-primary attc-btn-wide">Đăng nhập</button></p>
          </form>
-         <p class="attc-card__footer">Chưa có tài khoản? <a href="<?php echo esc_url(home_url('/dang-ky/')); ?>">Đăng ký</a> · <a href="<?php echo esc_url(home_url('/quen-mat-khau/')); ?>">Quên mật khẩu?</a></p>
+         <p class="attc-card__footer">Chưa có tài khoản? <a href="<?php echo esc_url(home_url('/dang-ky/')); ?>">Đăng ký</a>   <a style="margin-left:10px;" href="<?php echo esc_url(home_url('/quen-mat-khau/')); ?>">Quên mật khẩu?</a></p>
      </div>
      <?php if (!empty($site_key)) : ?>
      <script src="https://www.google.com/recaptcha/api.js" async defer></script>
@@ -716,12 +770,14 @@ function attc_register_form() {
 // ===== Handler: Đăng nhập =====
 function attc_do_login() {
     if (!isset($_POST['attc_login']) || !wp_verify_nonce($_POST['attc_login'], 'attc_login_nonce')) {
-        wp_redirect(add_query_arg('attc_error', urlencode('Yêu cầu không hợp lệ.'), wp_get_referer()));
+        $fallback = attc_login_fallback_url();
+        wp_redirect(add_query_arg('attc_error', urlencode('Yêu cầu không hợp lệ.'), $fallback));
         exit;
     }
     // reCAPTCHA (nếu được cấu hình)
     if (!attc_verify_recaptcha_if_configured()) {
-        wp_redirect(add_query_arg('attc_error', urlencode('Vui lòng xác nhận CAPTCHA.'), wp_get_referer()));
+        $fallback = attc_login_fallback_url();
+        wp_redirect(add_query_arg('attc_error', urlencode('Vui lòng xác nhận CAPTCHA.'), $fallback));
         exit;
     }
     $creds = [
@@ -732,7 +788,8 @@ function attc_do_login() {
     $user = wp_signon($creds, is_ssl());
     $redirect = !empty($_POST['redirect_to']) ? esc_url_raw($_POST['redirect_to']) : home_url('/chuyen-doi-giong-noi/');
     if (is_wp_error($user)) {
-        wp_redirect(add_query_arg('attc_error', urlencode($user->get_error_message()), wp_get_referer()));
+        $fallback = attc_login_fallback_url();
+        wp_redirect(add_query_arg('attc_error', urlencode($user->get_error_message()), $fallback));
         exit;
     }
     wp_redirect($redirect);
@@ -1198,3 +1255,90 @@ function attc_deactivate() {
     // Không xoá trang hay thư mục để tránh mất dữ liệu / link
 }
 register_deactivation_hook(__FILE__, 'attc_deactivate');
+
+// ===== Giới hạn upload theo ngày cho tài khoản miễn phí =====
+function attc_check_and_consume_daily_upload($user_id) {
+    // Bỏ giới hạn cho admin hoặc nếu site muốn bypass qua filter
+    if (user_can($user_id, 'manage_options')) {
+        return true;
+    }
+    $bypass = apply_filters('attc_should_bypass_quota', false, $user_id);
+    if ($bypass) return true;
+
+    $meta_key = 'attc_daily_upload_quota';
+    $today = current_time('Y-m-d'); // theo timezone của WP
+    $data = get_user_meta($user_id, $meta_key, true);
+    if (!is_array($data)) {
+        $data = ['date' => $today, 'count' => 0];
+    }
+
+    // Reset nếu sang ngày mới
+    if (!isset($data['date']) || $data['date'] !== $today) {
+        $data = ['date' => $today, 'count' => 0];
+    }
+
+    // Giới hạn 1 lần/ngày
+    if ((int)$data['count'] >= 1) {
+        return new WP_Error('daily_quota_exceeded', 'Tài khoản miễn phí chỉ được tải lên 1 file ghi âm mỗi ngày. Vui lòng thử lại vào ngày mai.');
+    }
+
+    // Tiêu thụ 1 lượt
+    $data['count'] = (int)$data['count'] + 1;
+    update_user_meta($user_id, $meta_key, $data);
+    return true;
+}
+
+// Helper: lấy số lượt còn lại trong ngày (không tiêu thụ)
+function attc_get_daily_remaining($user_id) {
+    $limit = 1;
+    // Admin hoặc bypass thì không giới hạn
+    if (user_can($user_id, 'manage_options') || apply_filters('attc_should_bypass_quota', false, $user_id)) {
+        return [
+            'limit' => $limit,
+            'used' => 0,
+            'remaining' => $limit,
+            'date' => current_time('Y-m-d'),
+            'unlimited' => true,
+        ];
+    }
+
+    $meta_key = 'attc_daily_upload_quota';
+    $today = current_time('Y-m-d');
+    $data = get_user_meta($user_id, $meta_key, true);
+    if (!is_array($data)) {
+        $data = ['date' => $today, 'count' => 0];
+    }
+    if (!isset($data['date']) || $data['date'] !== $today) {
+        $data = ['date' => $today, 'count' => 0];
+    }
+    $used = (int) ($data['count'] ?? 0);
+    $remaining = max(0, $limit - $used);
+    return [
+        'limit' => $limit,
+        'used' => $used,
+        'remaining' => $remaining,
+        'date' => $today,
+        'unlimited' => false,
+    ];
+}
+
+// Fallback URL an toàn cho trang đăng nhập khi referrer không hợp lệ
+function attc_login_fallback_url() {
+    $login_page = get_page_by_path('dang-nhap');
+    if ($login_page) {
+        return get_permalink($login_page);
+    }
+    return home_url('/dang-nhap/');
+}
+
+// Thêm tiền tố (prefix) vào tham số version khi enqueue CSS để cache-busting rõ ràng, tránh trình duyệt giữ bản cũ.
+function attc_enqueue_frontend_assets() {
+    if (is_admin()) return;
+    $handle = 'attc-frontend';
+    $src    = plugins_url('assets/css/frontend.css', __FILE__);
+    $path   = plugin_dir_path(__FILE__) . 'assets/css/frontend.css';
+    $verRaw = file_exists($path) ? filemtime($path) : time();
+    $ver    = 'attc-' . $verRaw;
+    wp_enqueue_style($handle, $src, [], $ver);
+}
+add_action('wp_enqueue_scripts', 'attc_enqueue_frontend_assets');
