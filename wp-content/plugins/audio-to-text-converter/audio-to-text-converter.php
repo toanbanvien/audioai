@@ -175,14 +175,16 @@ function attc_display_form() {
             if (!$quota_info['unlimited']) {
                 if (intval($quota_info['remaining']) <= 0) {
                     // Hết lượt => thông báo + nút nâng cấp và ẩn form
-                    echo '<div class="attc-alert attc-alert-error">Tài khoản miễn phí chỉ được tải lên 1 file ghi âm mỗi ngày. Vui lòng thử lại vào ngày mai.</div>';
+                    echo '<div class="attc-alert attc-alert-error">Tài khoản miễn phí chỉ được tải lên 1 file ghi âm 2 phút mỗi ngày. Vui lòng thử lại vào ngày mai, hoặc nâng cấp tài khoản để chuyển đổi không giới hạn!</div>';
                     $upgrade_url = apply_filters('attc_upgrade_url', home_url('/nang-cap/'), $uid);
                     echo '<p><a class="attc-login-btn" href="' . esc_url($upgrade_url) . '">Nâng cấp tài khoản</a></p>';
                     // Dừng render form
                     echo '</div>';
                     return ob_get_clean();
                 } else {
-                    echo '<div class="attc-quota">Bạn còn ' . intval($quota_info['remaining']) . '/' . intval($quota_info['limit']) . ' lượt hôm nay.</div>';
+                    //echo '<div class="attc-quota">Bạn còn ' . intval($quota_info['remaining']) . '/' . intval($quota_info['limit']) . ' lượt tải miễn phí hôm nay.</div>';
+                    echo '<div class="attc-quota">Bạn còn ' . intval($quota_info['remaining']).' lượt tải miễn phí hôm nay.</div>';
+
                 }
             }
         }
@@ -224,8 +226,18 @@ function attc_display_form() {
             <?php wp_nonce_field('attc_upload_nonce', 'attc_nonce'); ?>
 
             <div class="form-group">
-                <label for="audio_file">Chọn file ghi âm (MP3, WAV, M4A; tối đa 2 phút):</label>
-                <input type="file" name="audio_file" id="audio_file" accept="audio/mp3,audio/mpeg,audio/wav,audio/x-wav,audio/m4a,audio/x-m4a,audio/mp4" required>
+                <label for="audio_file">Chọn file ghi âm (MP3, WAV, M4A; miễn phí tối đa 2 phút):</label>
+                <div class="attc-dropzone" id="attcDropzone">
+                    <div class="attc-dropzone__inner">
+                        <div class="attc-dropzone__icon" aria-hidden="true">
+                            <svg width="36" height="36" viewBox="0 0 24 24" fill="none"><path d="M19 15v4a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-4" stroke="#2271b1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path><path d="M12 3v12" stroke="#2271b1" stroke-width="1.6" stroke-linecap="round"></path><path d="M8 9l4-4 4 4" stroke="#2271b1" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+                        </div>
+                        <div class="attc-dropzone__text"><strong>Kéo & Thả</strong> file vào đây hoặc <span class="attc-link">chọn file</span></div>
+                        <div class="attc-dropzone__hint">Hỗ trợ: MP3, WAV, M4A · Tối đa 2 phút</div>
+                    </div>
+                    <input class="attc-dropzone__input" type="file" name="audio_file" id="audio_file" accept="audio/mp3,audio/mpeg,audio/wav,audio/x-wav,audio/m4a,audio/x-m4a,audio/mp4" required>
+                </div>
+                <div class="attc-file-info" id="attcFileInfo"></div>
                 <p class="description">Lưu ý: Nếu file vượt quá 2 phút, hệ thống sẽ từ chối.</p>
             </div>
 
@@ -253,8 +265,63 @@ function attc_display_form() {
         .attc-top-nav{display:flex; gap:12px; margin:8px 0 16px}
         .attc-nav-link{display:inline-block; padding:8px 12px; border:1px solid #cfd4d9; border-radius:6px; text-decoration:none; color:#2271b1}
         .attc-nav-link:hover{background:#f3f6f9}
-        .attc-quota{background:#f8fafc; border:1px solid #e5e7eb; color:#0f172a; padding:8px 12px; border-radius:6px; margin:8px 0 12px; font-size:14px}
     </style>
+    <script>
+    document.addEventListener('DOMContentLoaded', function(){
+        const wrapper = document.querySelector('.audio-to-text-converter');
+        const form = wrapper ? wrapper.querySelector('form') : null;
+        if (!form) return;
+
+        const fileInput = document.getElementById('audio_file');
+        const dropzone = document.getElementById('attcDropzone');
+        const fileInfo = document.getElementById('attcFileInfo');
+
+        const formatBytes = (bytes) => {
+            if (bytes === 0) return '0 B';
+            const k = 1024, sizes = ['B','KB','MB','GB'];
+            const i = Math.floor(Math.log(bytes)/Math.log(k));
+            return parseFloat((bytes/Math.pow(k,i)).toFixed(2)) + ' ' + sizes[i];
+        };
+        const renderFileInfo = (file) => {
+            if (!file) { fileInfo.textContent = ''; return; }
+            fileInfo.innerHTML = '<strong>Đã chọn:</strong> ' +
+                '<span>' + (file.name || '') + '</span>' +
+                ' · <span>' + formatBytes(file.size || 0) + '</span>';
+        };
+
+        if (dropzone) {
+            const onBrowse = () => fileInput && fileInput.click();
+            dropzone.addEventListener('click', (e) => {
+                const isLink = e.target && e.target.classList && e.target.classList.contains('attc-link');
+                if (isLink || e.target === dropzone || dropzone.contains(e.target)) {
+                    onBrowse();
+                }
+            });
+            ['dragenter','dragover'].forEach(ev => dropzone.addEventListener(ev, (e)=>{
+                e.preventDefault(); e.stopPropagation();
+                dropzone.classList.add('is-dragover');
+            }));
+            ['dragleave','dragend','drop'].forEach(ev => dropzone.addEventListener(ev, ()=>{
+                dropzone.classList.remove('is-dragover');
+            }));
+            dropzone.addEventListener('drop', (e)=>{
+                e.preventDefault(); e.stopPropagation();
+                if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+                const file = e.dataTransfer.files[0];
+                fileInput.files = e.dataTransfer.files; // giữ nguyên flow backend
+                renderFileInfo(file);
+            });
+        }
+
+        fileInput.addEventListener('change', function(){
+            const f = this.files && this.files[0];
+            renderFileInfo(f);
+        });
+
+        // Bỏ kiểm tra thời lượng tại script này để tránh trùng lặp cảnh báo.
+        // Kiểm tra thời lượng 120s được thực hiện trong script phía dưới.
+    });
+    </script>
 
     <script>
     document.addEventListener('DOMContentLoaded', function() {
@@ -317,16 +384,30 @@ function attc_display_form() {
     return ob_get_clean();
 }
 
+// Chuẩn hoá xuống dòng: gộp nhiều newline liên tiếp thành 1 để tránh nhiều <br> khi hiển thị
+if (!function_exists('attc_normalize_text')) {
+function attc_normalize_text($text) {
+    // Chuẩn hoá line ending sang \n trước
+    $text = str_replace(["\r\n", "\r"], "\n", (string) $text);
+    // Gộp 2+ dòng trống liên tiếp thành 1 xuống dòng
+    $text = preg_replace('/\n{2,}/', "\n", $text);
+    // Trim khoảng trắng thừa ở đầu/cuối
+    return trim($text);
+}
+}
+
 // ===== Xử lý upload và gọi API =====
 function attc_process_audio() {
     if (!isset($_POST['attc_nonce']) || !wp_verify_nonce($_POST['attc_nonce'], 'attc_upload_nonce')) {
-        wp_redirect(add_query_arg('attc_error', urlencode('Lỗi bảo mật. Vui lòng thử lại.'), wp_get_referer()));
+        $back = attc_safe_referer_url();
+        wp_redirect(add_query_arg('attc_error', urlencode('Lỗi bảo mật. Vui lòng thử lại.'), $back));
         exit;
     }
 
     // Chặn phía server nếu chưa đăng nhập
     if (!is_user_logged_in()) {
-        wp_redirect(add_query_arg('attc_error', urlencode('Vui lòng đăng nhập để tải lên và chuyển đổi.'), wp_get_referer()));
+        $back = attc_safe_referer_url();
+        wp_redirect(add_query_arg('attc_error', urlencode('Vui lòng đăng nhập để tải lên và chuyển đổi.'), $back));
         exit;
     }
 
@@ -334,12 +415,14 @@ function attc_process_audio() {
     $user_id = get_current_user_id();
     $quota = attc_check_and_consume_daily_upload($user_id);
     if (is_wp_error($quota)) {
-        wp_redirect(add_query_arg('attc_error', urlencode($quota->get_error_message()), wp_get_referer()));
+        $back = attc_safe_referer_url();
+        wp_redirect(add_query_arg('attc_error', urlencode($quota->get_error_message()), $back));
         exit;
     }
 
     if (!isset($_FILES['audio_file']) || $_FILES['audio_file']['error'] !== UPLOAD_ERR_OK) {
-        wp_redirect(add_query_arg('attc_error', urlencode('Có lỗi khi tải lên file. Vui lòng thử lại.'), wp_get_referer()));
+        $back = attc_safe_referer_url();
+        wp_redirect(add_query_arg('attc_error', urlencode('Có lỗi khi tải lên file. Vui lòng thử lại.'), $back));
         exit;
     }
 
@@ -385,7 +468,8 @@ function attc_process_audio() {
     }
     if ($duration > 120) {
         @unlink($target);
-        wp_redirect(add_query_arg('attc_error', urlencode('File ghi âm vượt quá giới hạn 2 phút. Hệ thống không gọi API.'), wp_get_referer()));
+        $back = attc_safe_referer_url();
+        wp_redirect(add_query_arg('attc_error', urlencode('File ghi âm vượt quá giới hạn 2 phút. Hệ thống không gọi API.'), $back));
         exit;
     }
 
@@ -396,7 +480,8 @@ function attc_process_audio() {
     @unlink($target);
 
     if (is_wp_error($transcription)) {
-        wp_redirect(add_query_arg('attc_error', urlencode('Lỗi khi chuyển đổi: ' . $transcription->get_error_message()), wp_get_referer()));
+        $back = attc_safe_referer_url();
+        wp_redirect(add_query_arg('attc_error', urlencode('Lỗi khi chuyển đổi: ' . $transcription->get_error_message()), $back));
         exit;
     }
 
@@ -418,13 +503,24 @@ function attc_process_audio() {
     $token = wp_generate_uuid4();
     set_transient('attc_doc_' . $token, $final_text, 10 * MINUTE_IN_SECONDS);
 
+    $back = attc_safe_referer_url();
     $redirect_url = add_query_arg([
         'attc_result' => urlencode($final_text),
         'attc_token'  => $token,
-    ], wp_get_referer());
+    ], $back);
 
     wp_redirect($redirect_url);
     exit;
+}
+
+// Trả về URL referrer an toàn để redirect về trang frontend thay vì admin-post.php
+function attc_safe_referer_url() {
+    $fallback = home_url('/chuyen-doi-giong-noi/');
+    $ref = wp_get_referer();
+    if (empty($ref)) return $fallback;
+    // Tránh quay lại admin-post.php
+    if (false !== strpos($ref, 'admin-post.php')) return $fallback;
+    return $ref;
 }
 
 // ===== Lấy thời lượng file (giây) =====
@@ -551,9 +647,14 @@ function attc_add_history($user_id, $text) {
     $key = 'attc_history';
     $history = get_user_meta($user_id, $key, true);
     if (!is_array($history)) $history = [];
+    // Chuẩn hoá văn bản: gộp nhiều dòng trống liên tiếp thành 1
+    if (!function_exists('attc_normalize_text')) {
+        // no-op nếu helper chưa sẵn (sẽ được định nghĩa bên dưới)
+    }
+    $normalized = function_exists('attc_normalize_text') ? attc_normalize_text($text) : $text;
     $history[] = [
         'time' => time(),
-        'text' => $text,
+        'text' => $normalized,
     ];
     // Giới hạn 50 mục gần nhất
     if (count($history) > 50) {
@@ -1279,7 +1380,7 @@ function attc_check_and_consume_daily_upload($user_id) {
 
     // Giới hạn 1 lần/ngày
     if ((int)$data['count'] >= 1) {
-        return new WP_Error('daily_quota_exceeded', 'Tài khoản miễn phí chỉ được tải lên 1 file ghi âm mỗi ngày. Vui lòng thử lại vào ngày mai.');
+        return new WP_Error('daily_quota_exceeded', 'Tài khoản miễn phí chỉ được tải lên 1 file ghi âm 2 phút mỗi ngày. Vui lòng thử lại vào ngày mai, hoặc nâng cấp tài khoản để chuyển đổi không giới hạn!');
     }
 
     // Tiêu thụ 1 lượt
