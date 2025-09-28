@@ -10,6 +10,497 @@ if (!defined('ABSPATH')) {
     exit; // Chặn truy cập trực tiếp
 }
 
+// ===== Webhook Helpers =====
+function attc_verify_webhook_token($provided, $option_key) {
+    $expected = get_option($option_key, '');
+    $provided = (string) $provided;
+    if (empty($expected) || empty($provided)) return false;
+    // So sánh cố định độ dài để tránh timing attack đơn giản
+    if (function_exists('hash_equals')) {
+        return hash_equals($expected, $provided);
+    }
+    return $expected === $provided;
+}
+
+function attc_extract_user_from_note($note) {
+    // Mặc định parse dạng: NANGCAP-<user_id>
+    $note = (string) $note;
+    if (preg_match('/NANGCAP-(\d+)/i', $note, $m)) {
+        return (int) $m[1];
+    }
+    return 0;
+}
+
+// ===== Webhook MoMo =====
+function attc_handle_webhook_momo() {
+    // Xác thực token
+    $token = isset($_REQUEST['token']) ? sanitize_text_field($_REQUEST['token']) : '';
+    if (!attc_verify_webhook_token($token, 'attc_webhook_momo_token')) {
+        status_header(403);
+        wp_send_json_error(['message' => 'Invalid token'], 403);
+    }
+
+    // Lấy raw body & cho phép filter để parse theo chuẩn MoMo tích hợp
+    $raw = file_get_contents('php://input');
+    // Optional HMAC verification
+    $hHeader = trim((string) get_option('attc_webhook_momo_hmac_header', ''));
+    $hSecret = (string) get_option('attc_webhook_momo_hmac_secret', '');
+    if (!empty($hHeader) && !empty($hSecret)) {
+        $providedSig = isset($_SERVER['HTTP_' . strtoupper(str_replace('-', '_', $hHeader))]) ? trim($_SERVER['HTTP_' . strtoupper(str_replace('-', '_', $hHeader))]) : '';
+        $calcSig = hash_hmac('sha256', $raw, $hSecret);
+        $okSig = apply_filters('attc_verify_momo_signature', hash_equals($providedSig, $calcSig), $providedSig, $calcSig, $raw);
+        if (!$okSig) { status_header(403); wp_send_json_error(['message' => 'Invalid signature'], 403); }
+    }
+    $data = json_decode($raw, true);
+    if (!is_array($data)) { $data = $_POST; }
+    $parsed = apply_filters('attc_parse_momo_webhook', [
+        'amount'  => isset($data['amount']) ? (int)$data['amount'] : 0,
+        'note'    => isset($data['note']) ? (string)$data['note'] : '',
+        'txid'    => isset($data['transId']) ? (string)$data['transId'] : '',
+        'user_id' => 0,
+        'currency'=> isset($data['currency']) ? (string)$data['currency'] : 'VND',
+    ], $data);
+
+    if (empty($parsed['user_id'])) {
+        $parsed['user_id'] = attc_extract_user_from_note($parsed['note'] ?? '');
+    }
+
+    $user_id = (int) ($parsed['user_id'] ?? 0);
+    $amount  = (int) ($parsed['amount'] ?? 0);
+    if ($user_id <= 0 || $amount <= 0) {
+        status_header(400);
+        wp_send_json_error(['message' => 'Invalid payload'], 400);
+    }
+
+    // Ghi có vào ví
+    $ok = attc_credit_wallet($user_id, $amount, [
+        'reason' => 'webhook_momo',
+        'note'   => (string) ($parsed['note'] ?? ''),
+        'txid'   => (string) ($parsed['txid'] ?? ''),
+        'raw'    => $data,
+    ]);
+    if (is_wp_error($ok)) {
+        status_header(500);
+        wp_send_json_error(['message' => $ok->get_error_message()], 500);
+    }
+    wp_send_json_success(['credited' => $amount, 'user_id' => $user_id]);
+}
+
+// ===== Default filters from saved options (MoMo/Bank/Patterns) =====
+add_filter('attc_momo_info', function($info){
+    $phone = get_option('attc_momo_phone', '');
+    $name  = get_option('attc_momo_name', '');
+    // Defaults if not set in options
+    if (empty($phone)) $phone = '0772729789';
+    if (empty($name))  $name  = 'Đinh Công Toàn';
+    if (!empty($phone)) $info['phone'] = $phone;
+    if (!empty($name))  $info['name']  = $name;
+    return $info;
+}, 5);
+
+// ===== Casso specific parser (default integration) =====
+// Casso thường gửi JSON dạng { data: [ { amount, description, tid/transaction_id/... } ] }
+add_filter('attc_parse_bank_webhook', function($parsed, $raw){
+    if (is_array($raw) && isset($raw['data']) && is_array($raw['data']) && !empty($raw['data'])) {
+        $tx = $raw['data'][0];
+        if (isset($tx['amount']) || isset($tx['description']) || isset($tx['content']) || isset($tx['tid']) || isset($tx['transaction_id'])) {
+            if (isset($tx['amount'])) { $parsed['amount'] = (int) $tx['amount']; }
+            if (isset($tx['description'])) { $parsed['note'] = (string) $tx['description']; }
+            elseif (isset($tx['content'])) { $parsed['note'] = (string) $tx['content']; }
+            if (isset($tx['tid'])) { $parsed['txid'] = (string) $tx['tid']; }
+            elseif (isset($tx['transaction_id'])) { $parsed['txid'] = (string) $tx['transaction_id']; }
+        }
+    }
+    return $parsed;
+}, 5, 2);
+
+add_filter('attc_momo_link_pattern', function($pattern){
+    $opt = get_option('attc_momo_link_pattern', '');
+    if (!empty($opt)) return $opt;
+    // Default to nhantien link for provided phone
+    return 'https://nhantien.momo.vn/0772729789?amount={amount}&message={note}';
+}, 5);
+
+add_filter('attc_vietqr_image_pattern', function($pattern){
+    $opt = get_option('attc_vietqr_image_pattern', '');
+    if (!empty($opt)) return $opt;
+    return $pattern;
+}, 5);
+
+add_filter('attc_bank_accounts', function($banks){
+    // If options set for ACB, ensure at least one ACB account is present or fill defaults
+    $acc = get_option('attc_bank_acb_account_no', '');
+    $name = get_option('attc_bank_acb_account_name', '');
+    if (empty($acc)) $acc = '240306539';
+    if (empty($name)) $name = 'Dinh Cong Toan';
+    if (empty($acc) || empty($name)) return $banks;
+    // If banks is empty or contains placeholder, set to ACB only
+    if (!is_array($banks) || empty($banks)) {
+        return [[
+            'bank_code' => 'ACB',
+            'bank_name' => 'ACB',
+            'account_no'=> $acc,
+            'account_name' => $name,
+            'note' => 'NANGCAP-' . get_current_user_id(),
+            'qr_img' => '',
+        ]];
+    }
+    // Otherwise map any ACB placeholders
+    foreach ($banks as &$b) {
+        if (isset($b['bank_code']) && strtoupper($b['bank_code']) === 'ACB') {
+            if (empty($b['account_no'])) $b['account_no'] = $acc;
+            if (empty($b['account_name'])) $b['account_name'] = $name;
+        }
+    }
+    return $banks;
+}, 5);
+
+// ===== Webhook Bank/VietQR =====
+function attc_handle_webhook_bank() {
+    // Xác thực token
+    $token = isset($_REQUEST['token']) ? sanitize_text_field($_REQUEST['token']) : '';
+    if (!attc_verify_webhook_token($token, 'attc_webhook_bank_token')) {
+        status_header(403);
+        wp_send_json_error(['message' => 'Invalid token'], 403);
+    }
+
+    $raw = file_get_contents('php://input');
+    // Optional HMAC verification
+    $hHeader = trim((string) get_option('attc_webhook_bank_hmac_header', ''));
+    $hSecret = (string) get_option('attc_webhook_bank_hmac_secret', '');
+    if (!empty($hHeader) && !empty($hSecret)) {
+        $providedSig = isset($_SERVER['HTTP_' . strtoupper(str_replace('-', '_', $hHeader))]) ? trim($_SERVER['HTTP_' . strtoupper(str_replace('-', '_', $hHeader))]) : '';
+        $calcSig = hash_hmac('sha256', $raw, $hSecret);
+        $okSig = apply_filters('attc_verify_bank_signature', hash_equals($providedSig, $calcSig), $providedSig, $calcSig, $raw);
+        if (!$okSig) { status_header(403); wp_send_json_error(['message' => 'Invalid signature'], 403); }
+    }
+    $data = json_decode($raw, true);
+    if (!is_array($data)) { $data = $_POST; }
+    $parsed = apply_filters('attc_parse_bank_webhook', [
+        'amount'  => isset($data['amount']) ? (int)$data['amount'] : 0,
+        'note'    => isset($data['description']) ? (string)$data['description'] : (isset($data['note']) ? (string)$data['note'] : ''),
+        'txid'    => isset($data['tid']) ? (string)$data['tid'] : (isset($data['transId']) ? (string)$data['transId'] : ''),
+        'user_id' => 0,
+        'currency'=> isset($data['currency']) ? (string)$data['currency'] : 'VND',
+    ], $data);
+
+    if (empty($parsed['user_id'])) {
+        $parsed['user_id'] = attc_extract_user_from_note($parsed['note'] ?? '');
+    }
+
+    $user_id = (int) ($parsed['user_id'] ?? 0);
+    $amount  = (int) ($parsed['amount'] ?? 0);
+    if ($user_id <= 0 || $amount <= 0) {
+        status_header(400);
+        wp_send_json_error(['message' => 'Invalid payload'], 400);
+    }
+
+    $ok = attc_credit_wallet($user_id, $amount, [
+        'reason' => 'webhook_bank',
+        'note'   => (string) ($parsed['note'] ?? ''),
+        'txid'   => (string) ($parsed['txid'] ?? ''),
+        'raw'    => $data,
+    ]);
+    if (is_wp_error($ok)) {
+        status_header(500);
+        wp_send_json_error(['message' => $ok->get_error_message()], 500);
+    }
+    wp_send_json_success(['credited' => $amount, 'user_id' => $user_id]);
+}
+
+// ===== Admin: Trang nạp ví thủ công =====
+function attc_wallet_admin_page() {
+    if (!current_user_can('manage_options')) {
+        wp_die('Bạn không có quyền truy cập.');
+    }
+
+    $message = '';
+    if (isset($_POST['attc_wallet_submit'])) {
+        check_admin_referer('attc_wallet_action', 'attc_wallet_nonce');
+        $user_field = sanitize_text_field($_POST['attc_wallet_user'] ?? '');
+        $amount = (int) ($_POST['attc_wallet_amount'] ?? 0);
+        $type = sanitize_text_field($_POST['attc_wallet_type'] ?? 'credit');
+        $note = sanitize_text_field($_POST['attc_wallet_note'] ?? '');
+
+        $user = false;
+        if (is_numeric($user_field)) { $user = get_user_by('id', (int)$user_field); }
+        if (!$user) { $user = get_user_by('email', $user_field); }
+        if (!$user) { $user = get_user_by('login', $user_field); }
+
+        if (!$user) {
+            $message = '<div class="notice notice-error"><p>Không tìm thấy người dùng.</p></div>';
+        } elseif ($amount <= 0) {
+            $message = '<div class="notice notice-error"><p>Số tiền phải lớn hơn 0.</p></div>';
+        } else {
+            if ($type === 'debit') {
+                $res = attc_charge_wallet($user->ID, $amount, ['reason' => 'admin_debit', 'note' => $note]);
+            } else {
+                $res = attc_credit_wallet($user->ID, $amount, ['reason' => 'admin_credit', 'note' => $note]);
+            }
+            if (is_wp_error($res)) {
+                $message = '<div class="notice notice-error"><p>' . esc_html($res->get_error_message()) . '</p></div>';
+            } else {
+                $message = '<div class="notice notice-success"><p>Thao tác thành công cho user ID ' . (int)$user->ID . '.</p></div>';
+            }
+        }
+    }
+
+    ?>
+    <div class="wrap">
+        <h1>Ví người dùng</h1>
+        <?php echo $message; ?>
+        <form method="post">
+            <?php wp_nonce_field('attc_wallet_action', 'attc_wallet_nonce'); ?>
+            <table class="form-table" role="presentation">
+                <tr>
+                    <th scope="row"><label for="attc_wallet_user">Người dùng (ID / Email / Username)</label></th>
+                    <td><input type="text" name="attc_wallet_user" id="attc_wallet_user" class="regular-text" required></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_wallet_amount">Số tiền (VND)</label></th>
+                    <td><input type="number" min="1" name="attc_wallet_amount" id="attc_wallet_amount" class="regular-text" required></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_wallet_type">Loại</label></th>
+                    <td>
+                        <select name="attc_wallet_type" id="attc_wallet_type">
+                            <option value="credit">Cộng tiền (+)</option>
+                            <option value="debit">Trừ tiền (-)</option>
+                        </select>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_wallet_note">Ghi chú</label></th>
+                    <td><input type="text" name="attc_wallet_note" id="attc_wallet_note" class="regular-text"></td>
+                </tr>
+            </table>
+            <?php submit_button('Thực hiện', 'primary', 'attc_wallet_submit'); ?>
+        </form>
+    </div>
+    <?php
+}
+
+// ===== Trang Nâng Cấp: Pricing + Thanh toán MoMo/Ngân hàng =====
+function attc_upgrade_shortcode() {
+    // Giá/phút hiện hành
+    $price_per_min = (int) attc_get_price_per_minute();
+
+    // Mặc định: gói nạp ví dựa trên 500 VND/phút
+    // 20k ~ 40 phút, 50k ~ 100 phút, 100k ~ 200 phút
+    $default_plans = [
+        [ 'id' => 'topup-20k',  'title' => 'Nạp 20.000đ',  'amount' => 20000 ],
+        [ 'id' => 'topup-50k',  'title' => 'Nạp 50.000đ',  'amount' => 50000 ],
+        [ 'id' => 'topup-100k', 'title' => 'Nạp 100.000đ', 'amount' => 100000, 'highlight' => true ],
+    ];
+    $plans = apply_filters('attc_upgrade_plans', $default_plans, $price_per_min);
+
+    $momo = apply_filters('attc_momo_info', [
+        'phone' => '',        // SĐT/ví MoMo nhận
+        'name'  => '',        // Tên chủ ví
+        'note'  => 'NANGCAP-' . get_current_user_id(), // nội dung CK để đối soát
+        'qr_img'=> '',        // URL ảnh QR MoMo (tùy chọn, nếu có sẵn)
+    ]);
+
+    // Mẫu liên kết/thanh toán MoMo (có thể override để tạo deeplink thực sự)
+    // Dùng placeholder {amount} và {note}
+    $momo_link_pattern = apply_filters('attc_momo_link_pattern', '');
+
+    $banks = apply_filters('attc_bank_accounts', [
+        [
+            'bank_code' => 'ACB',     // Ví dụ: 'ACB', 'VCB', 'TCB'
+            'bank_name' => 'ACB',
+            'account_no'=> '',
+            'account_name' => '',
+            'note' => 'NANGCAP-' . get_current_user_id(),
+            'qr_img' => '', // Nếu để rỗng, sẽ tự tạo URL VietQR theo pattern bên dưới
+        ],
+    ]);
+
+    // Mẫu ảnh VietQR: https://img.vietqr.io/image/{bank_code}-{account_no}-compact.png?amount={amount}&addInfo={note}&accountName={account_name}
+    $vietqr_pattern = apply_filters('attc_vietqr_image_pattern', 'https://img.vietqr.io/image/{bank_code}-{account_no}-compact.png?amount={amount}&addInfo={note}&accountName={account_name}');
+
+    ob_start();
+    ?>
+    <div class="attc-upgrade">
+        <h2>Nâng cấp tài khoản</h2>
+        <p class="attc-upgrade-sub">Dành cho sinh viên Việt Nam: giá rẻ, dễ thanh toán qua MoMo hoặc chuyển khoản ngân hàng.</p>
+
+        <div class="attc-pricing">
+            <?php foreach ($plans as $plan): $amt = (int)($plan['amount'] ?? 0); $mins = $price_per_min > 0 ? floor($amt / $price_per_min) : 0; ?>
+            <div class="attc-card <?php echo !empty($plan['highlight']) ? 'is-hot' : ''; ?>">
+                <div class="attc-card-title"><?php echo esc_html($plan['title']); ?></div>
+                <div class="attc-card-price">
+                    <strong><?php echo number_format($amt, 0, ',', '.'); ?>đ</strong>
+                    <span>≈ <?php echo (int)$mins; ?> phút</span>
+                </div>
+                <a class="attc-plan-select" href="#attc-payments" data-plan="<?php echo esc_attr($plan['id']); ?>" data-amount="<?php echo (int)$amt; ?>">Chọn gói này</a>
+            </div>
+            <?php endforeach; ?>
+        </div>
+
+        <div id="attc-payments" class="attc-payments">
+            <h3>Thanh toán</h3>
+            <p>Vui lòng chuyển khoản theo một trong các phương thức dưới đây và ghi đúng nội dung chuyển khoản để hệ thống tự động đối soát.</p>
+
+            <div class="attc-pay-grid" data-price-per-min="<?php echo (int)$price_per_min; ?>">
+                <div class="attc-pay-box is-disabled" id="attc-pay-momo">
+                    <div class="attc-pay-title">MoMo</div>
+                    <?php if (!empty($momo['qr_img'])): ?>
+                        <img class="attc-qr" src="<?php echo esc_url($momo['qr_img']); ?>" alt="QR MoMo">
+                    <?php endif; ?>
+                    <div class="attc-pay-line"><span>SĐT:</span> <strong><?php echo esc_html($momo['phone']); ?></strong></div>
+                    <div class="attc-pay-line"><span>Tên ví:</span> <strong><?php echo esc_html($momo['name']); ?></strong></div>
+                    <div class="attc-pay-line"><span>Số tiền:</span> <code id="attc-amount-display">0</code> <button class="attc-copy" data-target="#attc-amount-display">Copy</button></div>
+                    <div class="attc-pay-line"><span>Nội dung:</span> <code id="attc-momo-note"><?php echo esc_html($momo['note']); ?></code> <button class="attc-copy" data-target="#attc-momo-note">Copy</button></div>
+                    <div class="attc-pay-line"><a id="attc-momo-paylink" class="attc-pay-btn is-disabled" href="#" target="_blank" rel="noopener" aria-disabled="true">Mở MoMo để thanh toán</a></div>
+                </div>
+
+                <?php foreach ($banks as $i => $b): ?>
+                <div class="attc-pay-box is-disabled" id="attc-pay-bank-<?php echo $i; ?>">
+                    <div class="attc-pay-title"><?php echo esc_html($b['bank_name'] ?: $b['bank_code']); ?></div>
+                    <?php
+                        $qr_src = $b['qr_img'];
+                        if (empty($qr_src)) {
+                            $qr_src = strtr($vietqr_pattern, [
+                                '{bank_code}' => urlencode($b['bank_code']),
+                                '{account_no}' => urlencode($b['account_no']),
+                                '{amount}' => '0', // sẽ cập nhật bằng JS khi chọn gói
+                                '{note}' => rawurlencode($b['note']),
+                                '{account_name}' => rawurlencode($b['account_name']),
+                            ]);
+                        }
+                    ?>
+                    <img class="attc-qr" data-base="<?php echo esc_attr($vietqr_pattern); ?>" data-bank="<?php echo esc_attr($b['bank_code']); ?>" data-acc="<?php echo esc_attr($b['account_no']); ?>" data-name="<?php echo esc_attr($b['account_name']); ?>" data-note="<?php echo esc_attr($b['note']); ?>" src="<?php echo esc_url($qr_src); ?>" alt="VietQR">
+                    <div class="attc-pay-line"><span>Số TK:</span> <strong><?php echo esc_html($b['account_no']); ?></strong></div>
+                    <div class="attc-pay-line"><span>Chủ TK:</span> <strong><?php echo esc_html($b['account_name']); ?></strong></div>
+                    <div class="attc-pay-line"><span>Nội dung:</span> <code id="attc-bank-note-<?php echo $i; ?>"><?php echo esc_html($b['note']); ?></code> <button class="attc-copy" data-target="#attc-bank-note-<?php echo $i; ?>">Copy</button></div>
+                </div>
+                <?php endforeach; ?>
+            </div>
+
+            <div class="attc-pay-help">
+                <p>Sau khi thanh toán, hệ thống sẽ kích hoạt trong vài phút nếu nội dung chuyển khoản khớp. Nếu cần hỗ trợ nhanh, vui lòng liên hệ quản trị viên và cung cấp ảnh biên lai.</p>
+            </div>
+        </div>
+    </div>
+
+    <style>
+        .attc-upgrade{max-width:920px;margin:0 auto;padding:20px}
+        .attc-upgrade-sub{color:#4b5563;margin:6px 0 18px}
+        .attc-pricing{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px}
+        .attc-card{border:1px solid #e5e7eb;border-radius:10px;padding:16px;background:#fff}
+        .attc-card.is-hot{border-color:#f59e0b;box-shadow:0 0 0 3px rgba(245,158,11,.12)}
+        .attc-card-title{font-weight:700;margin-bottom:8px}
+        .attc-card-price{font-size:20px;margin:6px 0 10px}
+        .attc-card-price strong{font-size:24px;color:#111827}
+        .attc-card-price span{color:#6b7280;font-size:13px;margin-left:4px}
+        .attc-card-feats{list-style:none;padding:0;margin:0 0 12px}
+        .attc-card-feats li{padding-left:18px;position:relative;margin:6px 0}
+        .attc-card-feats li:before{content:'✓';position:absolute;left:0;color:#16a34a}
+        .attc-plan-select, .attc-pay-btn{display:inline-block;background:#2271b1;color:#fff !important;padding:10px 12px;border-radius:6px;text-decoration:none;font-weight:600}
+        .attc-plan-select:hover, .attc-pay-btn:hover{background:#1b5c8f}
+        .attc-payments{margin-top:22px}
+        .attc-pay-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;margin-top:12px}
+        .attc-pay-box{border:1px solid #e5e7eb;border-radius:10px;padding:14px;background:#fff; position:relative}
+        .attc-pay-box.is-disabled{opacity:.6}
+        .attc-pay-btn.is-disabled{pointer-events:none; opacity:.7}
+        .attc-pay-title{font-weight:700;margin-bottom:8px}
+        .attc-qr{width:100%;max-width:220px;border-radius:8px;border:1px solid #e5e7eb}
+        .attc-pay-line{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
+        .attc-pay-line span{color:#374151;min-width:80px}
+        .attc-copy{background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;padding:4px 8px;cursor:pointer}
+        .attc-copy:hover{background:#e5e7eb}
+        code{background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:2px 4px}
+        .attc-pay-help{margin-top:10px;color:#4b5563}
+    </style>
+    <script>
+    document.addEventListener('DOMContentLoaded', function(){
+        var payGrid = document.querySelector('.attc-pay-grid');
+        var pricePerMin = 0;
+        if (payGrid && payGrid.getAttribute('data-price-per-min')) {
+            pricePerMin = parseInt(payGrid.getAttribute('data-price-per-min') || '0', 10) || 0;
+        }
+        var momoLinkPattern = <?php echo wp_json_encode($momo_link_pattern); ?>;
+        var amountDisplay = document.getElementById('attc-amount-display');
+        var momoNoteEl = document.getElementById('attc-momo-note');
+        var momoPayLink = document.getElementById('attc-momo-paylink');
+
+        function updateAmount(amount){
+            if (amountDisplay){ amountDisplay.textContent = (amount||0).toLocaleString('vi-VN'); }
+            var hasAmount = (amount||0) > 0;
+            // Update MoMo link
+            if (momoPayLink){
+                var note = momoNoteEl ? (momoNoteEl.textContent || '') : '';
+                if (momoLinkPattern){
+                    var href = momoLinkPattern.replace('{amount}', String(amount||0)).replace('{note}', encodeURIComponent(note||''));
+                    momoPayLink.setAttribute('href', href);
+                } else {
+                    momoPayLink.setAttribute('href', '#');
+                }
+                if (hasAmount){ momoPayLink.classList.remove('is-disabled'); momoPayLink.removeAttribute('aria-disabled'); }
+                else { momoPayLink.classList.add('is-disabled'); momoPayLink.setAttribute('aria-disabled','true'); }
+            }
+            // Update VietQR images
+            var imgs = document.querySelectorAll('.attc-qr[data-base]');
+            for (var i=0;i<imgs.length;i++){
+                var img = imgs[i];
+                var base = img.getAttribute('data-base');
+                var bank = img.getAttribute('data-bank');
+                var acc  = img.getAttribute('data-acc');
+                var name = img.getAttribute('data-name');
+                var note = img.getAttribute('data-note');
+                if (!base || !bank || !acc) continue;
+                var url = base
+                    .replace('{bank_code}', encodeURIComponent(bank))
+                    .replace('{account_no}', encodeURIComponent(acc))
+                    .replace('{amount}', String(amount||0))
+                    .replace('{note}', encodeURIComponent(note||''))
+                    .replace('{account_name}', encodeURIComponent(name||''));
+                img.setAttribute('src', url);
+            }
+            // Enable/disable pay boxes
+            var momoBox = document.getElementById('attc-pay-momo');
+            if (momoBox){ if (hasAmount) momoBox.classList.remove('is-disabled'); else momoBox.classList.add('is-disabled'); }
+            var bankBoxes = document.querySelectorAll('[id^="attc-pay-bank-"]');
+            for (var b=0;b<bankBoxes.length;b++){
+                if (hasAmount) bankBoxes[b].classList.remove('is-disabled'); else bankBoxes[b].classList.add('is-disabled');
+            }
+        }
+
+        var planButtons = document.querySelectorAll('.attc-plan-select[data-amount]');
+        for (var j=0;j<planButtons.length;j++){
+            planButtons[j].addEventListener('click', function(){
+                var id = this.getAttribute('data-plan');
+                var amt = parseInt(this.getAttribute('data-amount')||'0',10) || 0;
+                try { sessionStorage.setItem('attc_chosen_plan', id || ''); } catch(e){}
+                try { sessionStorage.setItem('attc_chosen_amount', String(amt)); } catch(e){}
+                updateAmount(amt);
+            });
+        }
+        // Nếu trước đó đã chọn plan, khôi phục
+        var prevAmt = 0;
+        try { prevAmt = parseInt(sessionStorage.getItem('attc_chosen_amount')||'0',10) || 0; } catch(e){ prevAmt = 0; }
+        if (prevAmt>0) updateAmount(prevAmt);
+
+        var copyBtns = document.querySelectorAll('.attc-copy');
+        for (var k=0;k<copyBtns.length;k++){
+            copyBtns[k].addEventListener('click', function(){
+                var sel = this.getAttribute('data-target');
+                var el = document.querySelector(sel);
+                if (!el) return;
+                var text = el.textContent || el.innerText || '';
+                navigator.clipboard.writeText(text).then(()=>{
+                    this.textContent = 'Đã copy';
+                    setTimeout(()=>{ this.textContent = 'Copy'; }, 1500);
+                });
+            });
+        }
+    });
+    </script>
+    <?php
+    return ob_get_clean();
+}
+
 // ===== Khởi tạo plugin =====
 function attc_init() {
     add_shortcode('audio_to_text_form', 'attc_display_form');
@@ -22,6 +513,8 @@ function attc_init() {
     add_shortcode('attc_forgot_form', 'attc_forgot_form');
     // Shortcode: đặt lại mật khẩu front-end
     add_shortcode('attc_reset_password_form', 'attc_reset_password_form');
+    // Shortcode trang nâng cấp
+    add_shortcode('attc_upgrade', 'attc_upgrade_shortcode');
 
     // Xử lý submit (frontend)
     add_action('admin_post_attc_process_audio', 'attc_process_audio');
@@ -112,6 +605,17 @@ function attc_maybe_create_frontend_pages() {
         ]);
         $created = true;
     }
+    // Trang nâng cấp
+    if (!get_page_by_path('nang-cap')) {
+        wp_insert_post([
+            'post_title'   => 'Nâng cấp tài khoản',
+            'post_name'    => 'nang-cap',
+            'post_status'  => 'publish',
+            'post_type'    => 'page',
+            'post_content' => '[attc_upgrade]'
+        ]);
+        $created = true;
+    }
     // Nếu vừa tạo trang mới, flush rewrite để tránh 404 ngay lập tức
     if ($created) {
         flush_rewrite_rules(false);
@@ -175,7 +679,7 @@ function attc_display_form() {
             if (!$quota_info['unlimited']) {
                 if (intval($quota_info['remaining']) <= 0) {
                     // Hết lượt => thông báo + nút nâng cấp và ẩn form
-                    echo '<div class="attc-alert attc-alert-error">Tài khoản miễn phí chỉ được tải lên 1 file ghi âm 2 phút mỗi ngày. Vui lòng thử lại vào ngày mai, hoặc nâng cấp tài khoản để chuyển đổi không giới hạn!</div>';
+                    echo '<div class="attc-alert attc-alert-error">Tài khoản miễn phí chỉ được tải lên 1 file ghi âm 2 phút mỗi ngày. Vui lòng thử lại vào ngày mai, hoặc Nâng Cấp Tài Khoản ngay để chuyển đổi không giới hạn!</div>';
                     $upgrade_url = apply_filters('attc_upgrade_url', home_url('/nang-cap/'), $uid);
                     echo '<p><a class="attc-login-btn" href="' . esc_url($upgrade_url) . '">Nâng cấp tài khoản</a></p>';
                     // Dừng render form
@@ -189,6 +693,9 @@ function attc_display_form() {
             }
         }
         ?>
+
+<a class="attc-upgrade-btn" href="<?php echo esc_url(apply_filters('attc_upgrade_url', '#', get_current_user_id())); ?>">Nâng cấp tài khoản chuyển đổi không giới hạn</a>
+
 
         <?php
         // Nếu chưa đăng nhập: hiển thị thông báo + nút đăng nhập/đăng ký và dừng tại đây
@@ -242,7 +749,7 @@ function attc_display_form() {
             </div>
 
             <div class="form-actions">
-                <button type="submit" class="button button-primary">Chuyển đổi thành văn bản</button>
+                <button type="submit" class="button button-primary">Chuyển đổi thành văn bản</button>                
             </div>
         </form>
     </div>
@@ -255,7 +762,7 @@ function attc_display_form() {
         .form-group {margin-bottom: 16px;}
         .form-group label {display: block; font-weight: 600; margin-bottom: 6px;}
         .description {color: #666; font-size: 13px;}
-        .form-actions {margin-top: 12px;}
+        .form-actions {margin-top: 12px; display:flex; gap:10px; align-items:center; flex-wrap:wrap}
         .button.button-primary {background: #2271b1; color: #fff; border: none; padding: 10px 16px; border-radius: 4px; cursor: pointer;}
         .button.button-primary:disabled {opacity: .7; cursor: not-allowed;}
         /* Nút tải .doc kiểu button download */
@@ -265,6 +772,9 @@ function attc_display_form() {
         .attc-top-nav{display:flex; gap:12px; margin:8px 0 16px}
         .attc-nav-link{display:inline-block; padding:8px 12px; border:1px solid #cfd4d9; border-radius:6px; text-decoration:none; color:#2271b1}
         .attc-nav-link:hover{background:#f3f6f9}
+        /* Nút nâng cấp */
+        .attc-upgrade-btn{display: inline-block;background: #f59e0b;color: #1f2937 !important;padding: 8px;border-radius: 4px;text-decoration: none;font-weight: 700;border: 1px solid #d97706;font-size: 16px;/* height: 36px; */margin-bottom: 20px;text-transform: uppercase;font-weight: bold;width: 100%;text-align: center;}
+        .attc-upgrade-btn:hover{background:#f59e0bdd}
     </style>
     <script>
     document.addEventListener('DOMContentLoaded', function(){
@@ -354,29 +864,11 @@ function attc_display_form() {
                 return;
             }
 
-            // Kiểm tra thời lượng ở client trước khi submit
-            e.preventDefault();
-            submitBtn.disabled = true; const original = submitBtn.textContent; submitBtn.textContent = 'Đang kiểm tra...';
-
-            const audio = new Audio();
-            audio.preload = 'metadata';
-            audio.onloadedmetadata = function() {
-                URL.revokeObjectURL(audio.src);
-                const duration = audio.duration; // giây
-                if (duration > 120) {
-                    alert('File ghi âm vượt quá giới hạn 2 phút. Vui lòng chọn file ngắn hơn.');
-                    submitBtn.disabled = false; submitBtn.textContent = original;
-                    return;
-                }
-                // Hợp lệ => submit thực sự
-                submitBtn.textContent = 'Đang gửi...';
-                form.submit();
-            };
-            audio.onerror = function() {
-                // Không đọc được metadata => vẫn gửi để server kiểm tra
-                form.submit();
-            };
-            audio.src = URL.createObjectURL(file);
+            // Không kiểm tra thời lượng ở client nữa để server quyết định theo loại tài khoản (miễn phí/paid)
+            // Tránh chặn các trường hợp tài khoản trả phí muốn upload > 2 phút.
+            submitBtn.textContent = 'Đang gửi...';
+            // Cho submit bình thường, server sẽ kiểm tra giới hạn phù hợp
+            
         });
     });
     </script>
@@ -411,7 +903,7 @@ function attc_process_audio() {
         exit;
     }
 
-    // Giới hạn: mỗi user miễn phí chỉ được upload 1 file/ngày
+    // Giới hạn: mỗi user miễn phí chỉ được upload 1 file/ngày (Paid sẽ bypass trong hàm)
     $user_id = get_current_user_id();
     $quota = attc_check_and_consume_daily_upload($user_id);
     if (is_wp_error($quota)) {
@@ -466,11 +958,41 @@ function attc_process_audio() {
         wp_redirect(add_query_arg('attc_error', urlencode('Không thể đọc thời lượng file. Vui lòng thử file khác.'), wp_get_referer()));
         exit;
     }
-    if ($duration > 120) {
-        @unlink($target);
-        $back = attc_safe_referer_url();
-        wp_redirect(add_query_arg('attc_error', urlencode('File ghi âm vượt quá giới hạn 2 phút. Hệ thống không gọi API.'), $back));
-        exit;
+    // Áp dụng giới hạn theo loại tài khoản
+    $is_paid = attc_is_paid_user($user_id);
+    if (!$is_paid) {
+        // Miễn phí: giữ giới hạn 2 phút
+        if ($duration > 120) {
+            @unlink($target);
+            $back = attc_safe_referer_url();
+            wp_redirect(add_query_arg('attc_error', urlencode('File ghi âm vượt quá giới hạn 2 phút đối với tài khoản miễn phí.'), $back));
+            exit;
+        }
+    } else {
+        // Trả phí: bỏ giới hạn 2 phút, áp trần tối đa theo cấu hình (mặc định 30 phút)
+        $paid_max_minutes = attc_get_paid_max_minutes();
+        $max_seconds = max(1, intval($paid_max_minutes)) * 60;
+        if ($duration > $max_seconds) {
+            @unlink($target);
+            $back = attc_safe_referer_url();
+            wp_redirect(add_query_arg('attc_error', urlencode('File vượt quá giới hạn tối đa ' . intval($paid_max_minutes) . ' phút cho mỗi lần tải.'), $back));
+            exit;
+        }
+    }
+
+    // Tính chi phí (nếu trả phí) theo phút, làm tròn lên phút
+    $billed_minutes = (int) ceil($duration / 60);
+    $price_per_min = (int) attc_get_price_per_minute();
+    $cost_vnd = $is_paid ? ($billed_minutes * $price_per_min) : 0;
+    if ($is_paid) {
+        $balance = attc_get_wallet_balance($user_id);
+        if ($balance < $cost_vnd) {
+            @unlink($target);
+            $back = attc_safe_referer_url();
+            $msg = 'Số dư ví không đủ để xử lý. Cần ' . number_format($cost_vnd, 0, ',', '.') . 'đ, số dư hiện tại ' . number_format($balance, 0, ',', '.') . 'đ. Vui lòng nạp thêm tại trang Nâng cấp.';
+            wp_redirect(add_query_arg('attc_error', urlencode($msg), $back));
+            exit;
+        }
     }
 
     // Gọi OpenAI Whisper
@@ -483,6 +1005,20 @@ function attc_process_audio() {
         $back = attc_safe_referer_url();
         wp_redirect(add_query_arg('attc_error', urlencode('Lỗi khi chuyển đổi: ' . $transcription->get_error_message()), $back));
         exit;
+    }
+
+    // Nếu là tài khoản trả phí và chuyển đổi thành công => trừ ví
+    if ($is_paid && $cost_vnd > 0) {
+        $charge = attc_charge_wallet($user_id, $cost_vnd, [
+            'reason'   => 'transcription',
+            'seconds'  => (int)$duration,
+            'minutes'  => (int)$billed_minutes,
+            'filename' => isset($file['name']) ? sanitize_file_name($file['name']) : '',
+        ]);
+        if (is_wp_error($charge)) {
+            // Lỗi khi trừ ví (hiếm). Không huỷ kết quả nhưng cảnh báo.
+            // Có thể gửi admin_email để xử lý thủ công.
+        }
     }
 
     // Hậu xử lý: thêm dấu câu (đặc biệt dấu chấm và phẩy), sửa chính tả tiếng Việt
@@ -1207,6 +1743,15 @@ function attc_add_admin_menu() {
         'audio-to-text-converter',
         'attc_options_page'
     );
+    // Trang nạp ví thủ công cho Admin
+    add_submenu_page(
+        'options-general.php',
+        'Ví người dùng (Audio to Text)',
+        'Ví người dùng',
+        'manage_options',
+        'attc-wallet-admin',
+        'attc_wallet_admin_page'
+    );
 }
 add_action('admin_menu', 'attc_add_admin_menu');
 
@@ -1218,12 +1763,42 @@ function attc_options_page() {
         update_option('attc_openai_api_key', sanitize_text_field($_POST['attc_openai_api_key'] ?? ''));
         update_option('attc_recaptcha_site_key', sanitize_text_field($_POST['attc_recaptcha_site_key'] ?? ''));
         update_option('attc_recaptcha_secret_key', sanitize_text_field($_POST['attc_recaptcha_secret_key'] ?? ''));
+        update_option('attc_webhook_momo_token', sanitize_text_field($_POST['attc_webhook_momo_token'] ?? ''));
+        update_option('attc_webhook_bank_token', sanitize_text_field($_POST['attc_webhook_bank_token'] ?? ''));
+        // MoMo & Bank display/payment options
+        update_option('attc_momo_phone', sanitize_text_field($_POST['attc_momo_phone'] ?? ''));
+        update_option('attc_momo_name', sanitize_text_field($_POST['attc_momo_name'] ?? ''));
+        update_option('attc_momo_link_pattern', esc_url_raw($_POST['attc_momo_link_pattern'] ?? ''));
+        update_option('attc_bank_acb_account_no', sanitize_text_field($_POST['attc_bank_acb_account_no'] ?? ''));
+        update_option('attc_bank_acb_account_name', sanitize_text_field($_POST['attc_bank_acb_account_name'] ?? ''));
+        update_option('attc_vietqr_image_pattern', esc_url_raw($_POST['attc_vietqr_image_pattern'] ?? ''));
+        // Optional HMAC verification for webhooks
+        update_option('attc_webhook_momo_hmac_secret', sanitize_text_field($_POST['attc_webhook_momo_hmac_secret'] ?? ''));
+        update_option('attc_webhook_momo_hmac_header', sanitize_text_field($_POST['attc_webhook_momo_hmac_header'] ?? ''));
+        update_option('attc_webhook_bank_hmac_secret', sanitize_text_field($_POST['attc_webhook_bank_hmac_secret'] ?? ''));
+        update_option('attc_webhook_bank_hmac_header', sanitize_text_field($_POST['attc_webhook_bank_hmac_header'] ?? ''));
         add_settings_error('attc_messages', 'attc_saved', 'Cài đặt đã được lưu.', 'updated');
     }
 
     $openai_api_key = get_option('attc_openai_api_key', '');
     $recaptcha_site_key = get_option('attc_recaptcha_site_key', '');
     $recaptcha_secret_key = get_option('attc_recaptcha_secret_key', '');
+    $webhook_momo_token = get_option('attc_webhook_momo_token', '');
+    $webhook_bank_token = get_option('attc_webhook_bank_token', '');
+    $webhook_momo_url = add_query_arg([ 'action' => 'attc_webhook_momo', 'token' => rawurlencode($webhook_momo_token) ], admin_url('admin-post.php'));
+    $webhook_bank_url = add_query_arg([ 'action' => 'attc_webhook_bank', 'token' => rawurlencode($webhook_bank_token) ], admin_url('admin-post.php'));
+    // Read MoMo/Bank display/payment options
+    $o_momo_phone = get_option('attc_momo_phone', '');
+    $o_momo_name = get_option('attc_momo_name', '');
+    $o_momo_link = get_option('attc_momo_link_pattern', '');
+    $o_acb_no = get_option('attc_bank_acb_account_no', '');
+    $o_acb_name = get_option('attc_bank_acb_account_name', '');
+    $o_vietqr_pattern = get_option('attc_vietqr_image_pattern', 'https://img.vietqr.io/image/{bank_code}-{account_no}-compact.png?amount={amount}&addInfo={note}&accountName={account_name}');
+    // HMAC options
+    $o_momo_hmac_secret = get_option('attc_webhook_momo_hmac_secret', '');
+    $o_momo_hmac_header = get_option('attc_webhook_momo_hmac_header', '');
+    $o_bank_hmac_secret = get_option('attc_webhook_bank_hmac_secret', '');
+    $o_bank_hmac_header = get_option('attc_webhook_bank_hmac_header', '');
     ?>
     <div class="wrap">
         <h1><?php echo esc_html(get_admin_page_title()); ?></h1>
@@ -1250,6 +1825,78 @@ function attc_options_page() {
                     <td>
                         <input type="password" id="attc_recaptcha_secret_key" name="attc_recaptcha_secret_key" class="regular-text" value="<?php echo esc_attr($recaptcha_secret_key); ?>">
                     </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_webhook_momo_token">MoMo Webhook Token</label></th>
+                    <td>
+                        <input type="text" id="attc_webhook_momo_token" name="attc_webhook_momo_token" class="regular-text" value="<?php echo esc_attr($webhook_momo_token); ?>">
+                        <p class="description">Bí mật dùng để xác thực webhook từ MoMo (tham số token).</p>
+                        <?php if (!empty($webhook_momo_token)): ?>
+                        <p><code><?php echo esc_html($webhook_momo_url); ?></code></p>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_webhook_bank_token">VietQR/Webhook Bank Token</label></th>
+                    <td>
+                        <input type="text" id="attc_webhook_bank_token" name="attc_webhook_bank_token" class="regular-text" value="<?php echo esc_attr($webhook_bank_token); ?>">
+                        <p class="description">Bí mật dùng để xác thực webhook từ dịch vụ sao kê (tham số token).</p>
+                        <?php if (!empty($webhook_bank_token)): ?>
+                        <p><code><?php echo esc_html($webhook_bank_url); ?></code></p>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr><th colspan="2"><h3>Hiển thị thanh toán (MoMo/Ngân hàng)</h3></th></tr>
+                <tr>
+                    <th scope="row"><label for="attc_momo_phone">SĐT MoMo nhận</label></th>
+                    <td><input type="text" id="attc_momo_phone" name="attc_momo_phone" class="regular-text" value="<?php echo esc_attr($o_momo_phone); ?>"></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_momo_name">Tên chủ ví MoMo</label></th>
+                    <td><input type="text" id="attc_momo_name" name="attc_momo_name" class="regular-text" value="<?php echo esc_attr($o_momo_name); ?>"></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_momo_link_pattern">Mẫu link MoMo</label></th>
+                    <td>
+                        <input type="text" id="attc_momo_link_pattern" name="attc_momo_link_pattern" class="regular-text" value="<?php echo esc_attr($o_momo_link); ?>">
+                        <p class="description">Dùng {amount} và {note}. Ví dụ: https://nhantien.momo.vn/0772729789?amount={amount}&message={note}</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_bank_acb_account_no">Số tài khoản ACB</label></th>
+                    <td><input type="text" id="attc_bank_acb_account_no" name="attc_bank_acb_account_no" class="regular-text" value="<?php echo esc_attr($o_acb_no); ?>"></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_bank_acb_account_name">Chủ tài khoản ACB</label></th>
+                    <td><input type="text" id="attc_bank_acb_account_name" name="attc_bank_acb_account_name" class="regular-text" value="<?php echo esc_attr($o_acb_name); ?>"></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_vietqr_image_pattern">Mẫu ảnh VietQR</label></th>
+                    <td>
+                        <input type="text" id="attc_vietqr_image_pattern" name="attc_vietqr_image_pattern" class="regular-text" value="<?php echo esc_attr($o_vietqr_pattern); ?>">
+                        <p class="description">Dùng {bank_code} {account_no} {amount} {note} {account_name}. Mặc định dùng img.vietqr.io.</p>
+                    </td>
+                </tr>
+                <tr><th colspan="2"><h3>Xác thực chữ ký webhook (tuỳ chọn)</h3></th></tr>
+                <tr>
+                    <th scope="row"><label for="attc_webhook_momo_hmac_header">MoMo HMAC Header</label></th>
+                    <td><input type="text" id="attc_webhook_momo_hmac_header" name="attc_webhook_momo_hmac_header" class="regular-text" value="<?php echo esc_attr($o_momo_hmac_header); ?>">
+                        <p class="description">Tên header chứa chữ ký HMAC (do hệ thống webhook MoMo gửi).</p></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_webhook_momo_hmac_secret">MoMo HMAC Secret</label></th>
+                    <td><input type="text" id="attc_webhook_momo_hmac_secret" name="attc_webhook_momo_hmac_secret" class="regular-text" value="<?php echo esc_attr($o_momo_hmac_secret); ?>">
+                        <p class="description">Khóa bí mật để tính HMAC (theo quy định tích hợp MoMo của bạn).</p></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_webhook_bank_hmac_header">Bank HMAC Header</label></th>
+                    <td><input type="text" id="attc_webhook_bank_hmac_header" name="attc_webhook_bank_hmac_header" class="regular-text" value="<?php echo esc_attr($o_bank_hmac_header); ?>">
+                        <p class="description">Tên header chứa chữ ký HMAC từ provider VietQR/sao kê.</p></td>
+                </tr>
+                <tr>
+                    <th scope="row"><label for="attc_webhook_bank_hmac_secret">Bank HMAC Secret</label></th>
+                    <td><input type="text" id="attc_webhook_bank_hmac_secret" name="attc_webhook_bank_hmac_secret" class="regular-text" value="<?php echo esc_attr($o_bank_hmac_secret); ?>">
+                        <p class="description">Khóa bí mật để tính HMAC của provider VietQR/sao kê.</p></td>
                 </tr>
             </table>
             <?php submit_button('Lưu cài đặt', 'primary', 'attc_save_settings'); ?>
@@ -1365,6 +2012,10 @@ function attc_check_and_consume_daily_upload($user_id) {
     }
     $bypass = apply_filters('attc_should_bypass_quota', false, $user_id);
     if ($bypass) return true;
+    // Nếu là tài khoản trả phí (ví > 0 hoặc có gói), bỏ giới hạn miễn phí
+    if (attc_is_paid_user($user_id)) {
+        return true;
+    }
 
     $meta_key = 'attc_daily_upload_quota';
     $today = current_time('Y-m-d'); // theo timezone của WP
@@ -1380,7 +2031,7 @@ function attc_check_and_consume_daily_upload($user_id) {
 
     // Giới hạn 1 lần/ngày
     if ((int)$data['count'] >= 1) {
-        return new WP_Error('daily_quota_exceeded', 'Tài khoản miễn phí chỉ được tải lên 1 file ghi âm 2 phút mỗi ngày. Vui lòng thử lại vào ngày mai, hoặc nâng cấp tài khoản để chuyển đổi không giới hạn!');
+        return new WP_Error('daily_quota_exceeded', 'Tài khoản miễn phí chỉ được tải lên 1 file ghi âm 2 phút mỗi ngày. Vui lòng thử lại vào ngày mai, hoặc Nâng Cấp Tài Khoản ngay để chuyển đổi không giới hạn!');
     }
 
     // Tiêu thụ 1 lượt
@@ -1430,6 +2081,77 @@ function attc_login_fallback_url() {
         return get_permalink($login_page);
     }
     return home_url('/dang-nhap/');
+}
+
+// ===== Ví tài khoản & cấu hình giá =====
+function attc_get_price_per_minute() {
+    // Giá mặc định 500 VND/phút, có thể thay bằng filter
+    $price = 500;
+    return (int) apply_filters('attc_price_per_minute', $price);
+}
+
+function attc_get_paid_max_minutes() {
+    // Trần thời lượng mặc định: 30 phút/file
+    $max = 30;
+    return (int) apply_filters('attc_paid_max_minutes', $max);
+}
+
+function attc_get_wallet_balance($user_id) {
+    $balance = get_user_meta($user_id, 'attc_wallet_balance', true);
+    if ($balance === '' || $balance === null) $balance = 0;
+    return (int) $balance;
+}
+
+function attc_set_wallet_balance($user_id, $amount) {
+    update_user_meta($user_id, 'attc_wallet_balance', max(0, (int)$amount));
+}
+
+function attc_add_wallet_history($user_id, $entry) {
+    $key = 'attc_wallet_history';
+    $hist = get_user_meta($user_id, $key, true);
+    if (!is_array($hist)) $hist = [];
+    $entry['time'] = time();
+    $hist[] = $entry;
+    // Giới hạn 200 mục gần nhất
+    if (count($hist) > 200) {
+        $hist = array_slice($hist, -200);
+    }
+    update_user_meta($user_id, $key, $hist);
+}
+
+function attc_charge_wallet($user_id, $amount, $meta = []) {
+    $amount = (int) $amount;
+    if ($amount <= 0) return true;
+    $bal = attc_get_wallet_balance($user_id);
+    if ($bal < $amount) {
+        return new WP_Error('insufficient_funds', 'Số dư ví không đủ.');
+    }
+    attc_set_wallet_balance($user_id, $bal - $amount);
+    attc_add_wallet_history($user_id, [
+        'type' => 'debit',
+        'amount' => $amount,
+        'meta' => $meta,
+    ]);
+    return true;
+}
+
+function attc_credit_wallet($user_id, $amount, $meta = []) {
+    $amount = (int) $amount;
+    if ($amount <= 0) return true;
+    $bal = attc_get_wallet_balance($user_id);
+    attc_set_wallet_balance($user_id, $bal + $amount);
+    attc_add_wallet_history($user_id, [
+        'type' => 'credit',
+        'amount' => $amount,
+        'meta' => $meta,
+    ]);
+    return true;
+}
+
+function attc_is_paid_user($user_id) {
+    $paid = attc_get_wallet_balance($user_id) > 0;
+    // Cho phép override qua filter (vd: có gói tháng không cần ví)
+    return (bool) apply_filters('attc_is_paid_user', $paid, $user_id);
 }
 
 // Thêm tiền tố (prefix) vào tham số version khi enqueue CSS để cache-busting rõ ràng, tránh trình duyệt giữ bản cũ.
