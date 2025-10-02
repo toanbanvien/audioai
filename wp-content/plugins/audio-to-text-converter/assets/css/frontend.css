@@ -57,3 +57,5 @@
 .attc-dropzone__input { position: absolute; left: -9999px; top: auto; width: 1px; height: 1px; opacity: 0; }
 .attc-dropzone { cursor: pointer; }
 .attc-file-info { margin: 10px 0 0; font-size: 14px; color: #0f172a; }
+.price-payment {font-size: 22px; color: #218838;font-weight: bold;}
+.attc-qr-fallback { color: #6b7280;font-style: italic; }
