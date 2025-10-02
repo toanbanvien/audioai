@@ -459,7 +459,7 @@ add_action('template_redirect', 'attc_handle_form_submission');
 
 function attc_form_shortcode() {
     if (!is_user_logged_in()) {
-        return '<p>Vui lòng <a href="' . wp_login_url(get_permalink()) . '">đăng nhập</a> để sử dụng chức năng này.</p>';
+        return '<div class="attc-auth-prompt"><p>Vui lòng <a href="' . esc_url(site_url('/dang-nhap')) . '">đăng nhập</a> hoặc <a href="' . esc_url(site_url('/dang-ky')) . '">đăng ký</a> để sử dụng chức năng này.</p></div>';
     }
 
     $user_id = get_current_user_id();
@@ -620,6 +620,437 @@ function attc_form_shortcode() {
 add_shortcode('audio_to_text_form', 'attc_form_shortcode');
 
 
+// ===== AUTHENTICATION SHORTCODES & HANDLERS =====
+
+// Chuyển hướng người dùng đã đăng nhập khỏi trang đăng nhập/đăng ký
+function attc_redirect_logged_in_user() {
+    if (is_user_logged_in() && (is_page('dang-nhap') || is_page('dang-ky'))) {
+        wp_redirect(site_url('/chuyen-doi-giong-noi/'));
+        exit();
+    }
+}
+add_action('template_redirect', 'attc_redirect_logged_in_user');
+
+// Nạp scripts và styles cho các trang xác thực
+function attc_auth_assets() {
+    if (is_page('dang-nhap') || is_page('dang-ky') || is_page('quen-mat-khau') || is_page('dat-lai-mat-khau')) {
+        // Nạp script reCAPTCHA
+        $site_key = get_option('attc_recaptcha_site_key');
+        if (!empty($site_key)) {
+            wp_enqueue_script('google-recaptcha', 'https://www.google.com/recaptcha/api.js', [], null, true);
+        }
+
+        // In CSS cho form
+        $auth_css = "
+        <style>
+            .attc-auth-form-wrap {
+                max-width: 420px;
+                margin: 3rem auto;
+                padding: 2.5rem;
+                background: #ffffff;
+                border-radius: 12px;
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.1);
+                font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif;
+            }
+            .attc-auth-form-wrap h2 {
+                text-align: center;
+                margin-bottom: 2rem;
+                font-size: 1.8rem;
+                color: #333;
+            }
+            .attc-auth-form-wrap .form-row {
+                margin-bottom: 1.5rem;
+            }
+            .attc-auth-form-wrap label {
+                display: block;
+                margin-bottom: 0.5rem;
+                font-weight: 600;
+                color: #555;
+            }
+            .attc-auth-form-wrap input[type='text'], 
+            .attc-auth-form-wrap input[type='password'], 
+            .attc-auth-form-wrap input[type='email'] {
+                box-sizing: border-box;
+                width: 100%;
+                padding: 0.8rem 1rem;
+                border: 1px solid #ddd;
+                border-radius: 8px;
+                transition: border-color 0.2s, box-shadow 0.2s;
+            }
+            .attc-auth-form-wrap input:focus {
+                outline: none;
+                border-color: #3498db;
+                box-shadow: 0 0 0 3px rgba(52, 152, 219, 0.2);
+            }
+            .attc-auth-form-wrap .submit-row {
+                margin-top: 2rem;
+            }
+            .attc-auth-form-wrap .submit-row input {
+                width: 100%;
+                padding: 0.9rem;
+                background: #27ae60;
+                color: white;
+                border: none;
+                border-radius: 8px;
+                cursor: pointer;
+                font-size: 1.1em;
+                font-weight: 600;
+                transition: background-color 0.2s;
+            }
+            .attc-auth-form-wrap .submit-row input:hover {
+                background: #2ecc71;
+            }
+            .attc-auth-errors, .attc-auth-info {
+                padding: 1rem;
+                border-radius: 8px;
+                margin-bottom: 1.5rem;
+                list-style: none;
+                margin-left: 0;
+            }
+            .attc-auth-errors { color: #c0392b; background: #fbeae5; }
+            .attc-auth-info { color: #2980b9; background-color: #eaf5fb; }
+            .attc-auth-switch {
+                text-align: center;
+                margin-top: 2rem;
+                display: flex;
+                flex-direction: column;
+                gap: 0.8rem;
+                color: #555;
+            }
+            .attc-auth-switch a { color: #3498db; text-decoration: none; font-weight: 600; }
+            .attc-auth-switch a:hover { text-decoration: underline; }
+            .g-recaptcha {
+                margin-bottom: 1.5rem;
+                display: flex;
+                justify-content: center;
+            }
+        </style>
+        ";
+        echo $auth_css;
+    }
+}
+add_action('wp_head', 'attc_auth_assets');
+
+// Hàm xác thực reCAPTCHA
+function attc_verify_recaptcha($response) {
+    $secret_key = get_option('attc_recaptcha_secret_key');
+    if (empty($secret_key)) return true; // Bỏ qua nếu chưa cấu hình
+    if (empty($response)) return false;
+
+    $verification_url = 'https://www.google.com/recaptcha/api/siteverify';
+    $verification_response = wp_remote_post($verification_url, [
+        'body' => [
+            'secret'   => $secret_key,
+            'response' => $response,
+            'remoteip' => $_SERVER['REMOTE_ADDR']
+        ]
+    ]);
+
+    if (is_wp_error($verification_response)) return false;
+
+    $result = json_decode(wp_remote_retrieve_body($verification_response), true);
+    return $result['success'] ?? false;
+}
+
+// ---- Login Form ----
+function attc_login_form_shortcode() {
+    if (is_user_logged_in()) return '';
+
+    $login_errors = get_transient('attc_login_errors');
+    if ($login_errors) delete_transient('attc_login_errors');
+
+    ob_start();
+    ?>
+    <div class="attc-auth-form-wrap">
+        <h2>Đăng nhập</h2>
+        <?php if ($login_errors): ?>
+            <div class="attc-auth-errors"><p><?php echo esc_html($login_errors); ?></p></div>
+        <?php endif; ?>
+        <form action="" method="post">
+            <div class="form-row">
+                <label for="attc_log">Tên đăng nhập hoặc Email</label>
+                <input type="text" name="log" id="attc_log" required>
+            </div>
+            <div class="form-row">
+                <label for="attc_pwd">Mật khẩu</label>
+                <input type="password" name="pwd" id="attc_pwd" required>
+            </div>
+            <?php $site_key = get_option('attc_recaptcha_site_key'); if (!empty($site_key)): ?>
+            <div class="form-row g-recaptcha" data-sitekey="<?php echo esc_attr($site_key); ?>"></div>
+            <?php endif; ?>
+            <div class="submit-row">
+                <?php wp_nonce_field('attc_login_action', 'attc_login_nonce'); ?>
+                <input type="submit" name="attc_login_submit" value="Đăng nhập">
+            </div>
+        </form>
+        <div class="attc-auth-switch">
+            <p><a href="<?php echo esc_url(site_url('/quen-mat-khau/')); ?>">Quên mật khẩu?</a></p>
+            <p>Chưa có tài khoản? <a href="<?php echo esc_url(site_url('/dang-ky')); ?>">Đăng ký ngay</a></p>
+        </div>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+add_shortcode('attc_login_form', 'attc_login_form_shortcode');
+
+function attc_handle_login() {
+    if (isset($_POST['attc_login_submit']) && wp_verify_nonce($_POST['attc_login_nonce'], 'attc_login_action')) {
+        
+        $recaptcha_response = $_POST['g-recaptcha-response'] ?? '';
+        if (!attc_verify_recaptcha($recaptcha_response)) {
+            set_transient('attc_login_errors', 'Xác thực reCAPTCHA không thành công. Vui lòng thử lại.', 30);
+            wp_redirect(site_url('/dang-nhap'));
+            exit;
+        }
+
+        $creds = [
+            'user_login'    => $_POST['log'],
+            'user_password' => $_POST['pwd'],
+            'remember'      => true
+        ];
+        $user = wp_signon($creds, false);
+
+        if (is_wp_error($user)) {
+            set_transient('attc_login_errors', 'Sai tên đăng nhập hoặc mật khẩu.', 30);
+            wp_redirect(site_url('/dang-nhap'));
+            exit;
+        } else {
+            wp_redirect(site_url('/chuyen-doi-giong-noi/'));
+            exit;
+        }
+    }
+}
+add_action('template_redirect', 'attc_handle_login');
+
+
+// ---- Register Form ----
+function attc_register_form_shortcode() {
+    if (is_user_logged_in()) return '';
+
+    $reg_errors = get_transient('attc_registration_errors');
+    if ($reg_errors) delete_transient('attc_registration_errors');
+
+    // Simple Captcha
+    $num1 = rand(1, 9);
+    $num2 = rand(1, 9);
+    set_transient('attc_captcha_sum', $num1 + $num2, 300); // Lưu tổng trong 5 phút
+
+    ob_start();
+    ?>
+    <div class="attc-auth-form-wrap">
+        <h2>Đăng ký tài khoản</h2>
+        <?php if ($reg_errors && is_array($reg_errors)):
+            echo '<div class="attc-auth-errors">';
+            foreach ($reg_errors as $error) {
+                echo '<p>' . esc_html($error) . '</p>';
+            }
+            echo '</div>';
+        endif; ?>
+        <form action="" method="post">
+            <div class="form-row"><label for="attc_reg_user">Tên người dùng</label><input type="text" name="reg_user" id="attc_reg_user" required></div>
+            <div class="form-row"><label for="attc_reg_email">Email</label><input type="email" name="reg_email" id="attc_reg_email" required></div>
+            <div class="form-row"><label for="attc_reg_pass">Mật khẩu</label><input type="password" name="reg_pass" id="attc_reg_pass" required></div>
+            <?php $site_key = get_option('attc_recaptcha_site_key'); if (!empty($site_key)): ?>
+            <div class="form-row g-recaptcha" data-sitekey="<?php echo esc_attr($site_key); ?>"></div>
+            <?php endif; ?>
+            <div class="submit-row">
+                <?php wp_nonce_field('attc_register_action', 'attc_register_nonce'); ?>
+                <input type="submit" name="attc_register_submit" value="Đăng ký">
+            </div>
+        </form>
+        <div class="attc-auth-switch">
+            <p>Đã có tài khoản? <a href="<?php echo esc_url(site_url('/dang-nhap')); ?>">Đăng nhập</a></p>
+        </div>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+add_shortcode('attc_register_form', 'attc_register_form_shortcode');
+
+function attc_handle_registration() {
+    if (isset($_POST['attc_register_submit']) && wp_verify_nonce($_POST['attc_register_nonce'], 'attc_register_action')) {
+        $username = sanitize_user($_POST['reg_user']);
+        $email = sanitize_email($_POST['reg_email']);
+        $password = $_POST['reg_pass'];
+        $recaptcha_response = $_POST['g-recaptcha-response'] ?? '';
+        $errors = new WP_Error();
+
+        if (!attc_verify_recaptcha($recaptcha_response)) {
+            $errors->add('recaptcha_failed', 'Xác thực reCAPTCHA không thành công. Vui lòng thử lại.');
+        }
+        if (empty($username) || empty($email) || empty($password)) {
+            $errors->add('field_required', 'Tất cả các trường là bắt buộc.');
+        }
+        if (username_exists($username)) {
+            $errors->add('username_exists', 'Tên người dùng này đã tồn tại.');
+        }
+        if (email_exists($email)) {
+            $errors->add('email_exists', 'Địa chỉ email này đã được sử dụng.');
+        }
+        if (!is_email($email)) {
+            $errors->add('invalid_email', 'Địa chỉ email không hợp lệ.');
+        }
+
+        if ($errors->has_errors()) {
+            set_transient('attc_registration_errors', $errors->get_error_messages(), 30);
+            wp_redirect(site_url('/dang-ky'));
+            exit;
+        } else {
+            $user_id = wp_create_user($username, $password, $email);
+            if (!is_wp_error($user_id)) {
+                wp_set_current_user($user_id, $username);
+                wp_set_auth_cookie($user_id, true, false);
+                wp_redirect(site_url('/chuyen-doi-giong-noi/'));
+                exit;
+            }
+        }
+    }
+}
+// ---- Lost & Reset Password Forms ----
+
+function attc_lost_password_form_shortcode() {
+    if (is_user_logged_in()) return '';
+    $message = get_transient('attc_password_reset_message');
+    if ($message) delete_transient('attc_password_reset_message');
+
+    ob_start();
+    ?>
+    <div class="attc-auth-form-wrap">
+        <h2>Quên mật khẩu</h2>
+        <?php if ($message): ?>
+            <div class="attc-auth-info"><p><?php echo esc_html($message); ?></p></div>
+        <?php endif; ?>
+        <p>Vui lòng nhập địa chỉ email của bạn. Bạn sẽ nhận được một liên kết để tạo mật khẩu mới qua email.</p>
+        <form action="" method="post">
+            <div class="form-row">
+                <label for="attc_user_login">Email</label>
+                <input type="email" name="user_login" id="attc_user_login" required>
+            </div>
+            <div class="submit-row">
+                <?php wp_nonce_field('attc_lost_password_action', 'attc_lost_password_nonce'); ?>
+                <input type="submit" name="attc_lost_password_submit" value="Lấy mật khẩu mới">
+            </div>
+        </form>
+    </div>
+    <?php
+    return ob_get_clean();
+}
+add_shortcode('attc_forgot_form', 'attc_lost_password_form_shortcode');
+
+function attc_handle_lost_password() {
+    if (isset($_POST['attc_lost_password_submit']) && wp_verify_nonce($_POST['attc_lost_password_nonce'], 'attc_lost_password_action')) {
+        $user_login = $_POST['user_login'];
+        $user_data = get_user_by('email', trim($user_login));
+
+        if (empty($user_data)) {
+            $user_data = get_user_by('login', trim($user_login));
+        }
+
+        if (!$user_data) {
+            set_transient('attc_password_reset_message', 'Lỗi: Không có người dùng nào được đăng ký với địa chỉ email hoặc tên người dùng đó.', 30);
+            wp_redirect(site_url('/quen-mat-khau'));
+            exit;
+        }
+
+        $key = get_password_reset_key($user_data);
+        if (is_wp_error($key)) {
+            set_transient('attc_password_reset_message', 'Lỗi: Không thể tạo khóa đặt lại mật khẩu.', 30);
+            wp_redirect(site_url('/quen-mat-khau'));
+            exit;
+        }
+
+        $reset_link = add_query_arg(['key' => $key, 'login' => rawurlencode($user_data->user_login)], site_url('/dat-lai-mat-khau/'));
+        
+        $message = "Ai đó đã yêu cầu đặt lại mật khẩu cho tài khoản sau:\r\n\r\n";
+        $message .= network_home_url('/') . "\r\n\r\n";
+        $message .= sprintf("Tên người dùng: %s\r\n\r\n", $user_data->user_login);
+        $message .= "Nếu đây là một lỗi, chỉ cần bỏ qua email này và sẽ không có gì xảy ra.\r\n\r\n";
+        $message .= "Để đặt lại mật khẩu của bạn, hãy truy cập địa chỉ sau:\r\n\r\n";
+        $message .= $reset_link . "\r\n";
+
+        wp_mail($user_data->user_email, 'Yêu cầu đặt lại mật khẩu', $message);
+
+        set_transient('attc_password_reset_message', 'Kiểm tra email của bạn để có liên kết xác nhận.', 300);
+        wp_redirect(site_url('/quen-mat-khau'));
+        exit;
+    }
+}
+add_action('template_redirect', 'attc_handle_lost_password');
+
+function attc_reset_password_form_shortcode() {
+    $reset_key = $_GET['key'] ?? '';
+    $reset_login = $_GET['login'] ?? '';
+    $user = check_password_reset_key($reset_key, $reset_login);
+
+    $message = get_transient('attc_password_reset_message');
+    if ($message) delete_transient('attc_password_reset_message');
+
+    ob_start();
+    if (is_wp_error($user)) {
+        echo '<div class="attc-auth-form-wrap"><div class="attc-auth-errors"><p>Link đặt lại mật khẩu không hợp lệ hoặc đã hết hạn. Vui lòng thử lại.</p></div></div>';
+    } else {
+        ?>
+        <div class="attc-auth-form-wrap">
+            <h2>Đặt lại mật khẩu</h2>
+            <?php if ($message): ?>
+                <div class="attc-auth-errors"><p><?php echo esc_html($message); ?></p></div>
+            <?php endif; ?>
+            <form action="" method="post">
+                <input type="hidden" name="reset_key" value="<?php echo esc_attr($reset_key); ?>">
+                <input type="hidden" name="reset_login" value="<?php echo esc_attr($reset_login); ?>">
+                <div class="form-row">
+                    <label for="pass1">Mật khẩu mới</label>
+                    <input type="password" name="pass1" id="pass1" required>
+                </div>
+                <div class="form-row">
+                    <label for="pass2">Nhập lại mật khẩu mới</label>
+                    <input type="password" name="pass2" id="pass2" required>
+                </div>
+                <div class="submit-row">
+                     <?php wp_nonce_field('attc_reset_password_action', 'attc_reset_password_nonce'); ?>
+                    <input type="submit" name="attc_reset_password_submit" value="Lưu mật khẩu">
+                </div>
+            </form>
+        </div>
+        <?php
+    }
+    return ob_get_clean();
+}
+add_shortcode('attc_reset_password_form', 'attc_reset_password_form_shortcode');
+
+function attc_handle_reset_password() {
+    if (isset($_POST['attc_reset_password_submit']) && wp_verify_nonce($_POST['attc_reset_password_nonce'], 'attc_reset_password_action')) {
+        $key = $_POST['reset_key'];
+        $login = $_POST['reset_login'];
+        $pass1 = $_POST['pass1'];
+        $pass2 = $_POST['pass2'];
+
+        $user = check_password_reset_key($key, $login);
+        $redirect_url = add_query_arg(['key' => $key, 'login' => $login], site_url('/dat-lai-mat-khau/'));
+
+        if (is_wp_error($user)) {
+            set_transient('attc_password_reset_message', 'Link đặt lại mật khẩu không hợp lệ hoặc đã hết hạn.', 30);
+            wp_redirect($redirect_url);
+            exit;
+        }
+
+        if ($pass1 !== $pass2) {
+            set_transient('attc_password_reset_message', 'Hai mật khẩu không khớp.', 30);
+            wp_redirect($redirect_url);
+            exit;
+        }
+
+        reset_password($user, $pass1);
+        set_transient('attc_login_errors', 'Mật khẩu của bạn đã được đặt lại thành công. Vui lòng đăng nhập.', 30);
+        wp_redirect(site_url('/dang-nhap'));
+        exit;
+    }
+}
+add_action('template_redirect', 'attc_handle_reset_password');
+
+
+
+
 // ===== Plugin Settings Page =====
 
 function attc_register_settings_page() {
@@ -658,31 +1089,53 @@ function attc_settings_page_html() {
 }
 
 function attc_settings_init() {
+    // OpenAI Section
     register_setting('attc_settings', 'attc_openai_api_key');
-
-    add_settings_section(
-        'attc_settings_section',
-        'Cài đặt API',
-        null,
-        'attc-settings'
-    );
-
+    add_settings_section('attc_openai_section', 'Cài đặt OpenAI API', null, 'attc-settings');
     add_settings_field(
         'attc_openai_api_key',
         'OpenAI API Key',
-        'attc_api_key_field_html',
+        'attc_settings_field_html',
         'attc-settings',
-        'attc_settings_section'
+        'attc_openai_section',
+        ['name' => 'attc_openai_api_key', 'type' => 'password', 'desc' => 'Nhập API Key của bạn từ tài khoản OpenAI.']
+    );
+
+    // reCAPTCHA Section
+    register_setting('attc_settings', 'attc_recaptcha_site_key');
+    register_setting('attc_settings', 'attc_recaptcha_secret_key');
+    add_settings_section('attc_recaptcha_section', 'Cài đặt Google reCAPTCHA v2', null, 'attc-settings');
+    add_settings_field(
+        'attc_recaptcha_site_key',
+        'Site Key',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_recaptcha_section',
+        ['name' => 'attc_recaptcha_site_key', 'type' => 'text', 'desc' => 'Lấy từ trang quản trị Google reCAPTCHA.']
+    );
+    add_settings_field(
+        'attc_recaptcha_secret_key',
+        'Secret Key',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_recaptcha_section',
+        ['name' => 'attc_recaptcha_secret_key', 'type' => 'password', 'desc' => 'Lấy từ trang quản trị Google reCAPTCHA.']
     );
 }
 add_action('admin_init', 'attc_settings_init');
 
-function attc_api_key_field_html() {
-    $api_key = get_option('attc_openai_api_key');
-    ?>
-    <input type="password" name="attc_openai_api_key" value="<?php echo esc_attr($api_key); ?>" class="regular-text">
-    <p class="description">Nhập API Key của bạn từ tài khoản OpenAI.</p>
-    <?php
+function attc_settings_field_html($args) {
+    $name = $args['name'];
+    $type = $args['type'];
+    $desc = $args['desc'];
+    $value = get_option($name);
+    printf(
+        '<input type="%s" name="%s" value="%s" class="regular-text"> <p class="description">%s</p>',
+        esc_attr($type),
+        esc_attr($name),
+        esc_attr($value),
+        esc_html($desc)
+    );
 }
 
 
