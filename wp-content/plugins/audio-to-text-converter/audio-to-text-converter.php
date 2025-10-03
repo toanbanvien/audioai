@@ -10,8 +10,16 @@ if (!defined('ABSPATH')) {
     exit; // Chặn truy cập trực tiếp
 }
 
-// Nạp các thành phần của plugin
-require_once(plugin_dir_path(__FILE__) . 'history-shortcode.php');
+// Chuyển hướng an toàn về trang trước hoặc trang chuyển đổi nếu thiếu Referer
+function attc_redirect_back() {
+    $url = wp_get_referer();
+    if (empty($url)) {
+        // Fallback đến trang chuyển đổi giọng nói
+        $url = site_url('/chuyen-doi-giong-noi/');
+    }
+    wp_safe_redirect($url);
+    exit;
+}
 
 // Endpoint để tải file docx
 function attc_handle_download_transcript() {
@@ -52,6 +60,9 @@ function attc_handle_download_transcript() {
     }
 }
 add_action('init', 'attc_handle_download_transcript');
+
+// Nạp các thành phần của plugin
+require_once(plugin_dir_path(__FILE__) . 'history-shortcode.php');
 
 
 
@@ -241,6 +252,16 @@ function attc_get_price_per_minute() {
 
 // ===== Upgrade Page Shortcode =====
 function attc_upgrade_shortcode() {
+    if (!is_user_logged_in()) {
+        return '<div class="attc-auth-prompt"><p>Vui lòng <a href="' . esc_url(site_url('/dang-nhap')) . '">đăng nhập</a> hoặc <a href="' . esc_url(site_url('/dang-ky')) . '">đăng ký</a> để sử dụng chức năng này.</p></div>';
+    }
+    $display_name = wp_get_current_user()->display_name;
+    $logout_url = wp_logout_url(get_permalink());
+    if (!is_user_logged_in()) {
+        return '<div class="attc-auth-prompt"><p>Vui lòng <a href="' . esc_url(site_url('/dang-nhap')) . '">đăng nhập</a> hoặc <a href="' . esc_url(site_url('/dang-ky')) . '">đăng ký</a> để sử dụng chức năng này.</p></div>';
+    }
+    $display_name = wp_get_current_user()->display_name;
+    $logout_url = wp_logout_url(get_permalink());
     $price_per_min = (int) attc_get_price_per_minute();
     $plans = [
         [ 'id' => 'topup-20k',  'title' => 'Nạp 20.000đ',  'amount' => 20000 ],
@@ -265,21 +286,67 @@ function attc_upgrade_shortcode() {
     .attc-card-title{font-weight:700;margin-bottom:8px}
     .attc-card-price strong{font-size:24px;}
     .attc-plan-select{display:inline-block;background:#2271b1;color:#fff !important;padding:10px 12px;border-radius:6px;text-decoration:none;font-weight:600;margin-top:10px;}
+    .attc-userbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: #f0f4f8; border: 1px solid #e3e8ee; padding: 12px 16px; border-radius: 8px; margin-bottom: 1.5rem; }
+    .attc-userbar .attc-username { margin: 0; font-weight: 600; color: #2c3e50; }
+    .attc-userbar .attc-logout-btn { background: #e74c3c; color: #fff !important; text-decoration: none; padding: 8px 12px; border-radius: 6px; font-weight: 600; transition: background-color .2s; }
+    .attc-userbar .attc-logout-btn:hover { background: #ff6b61; }
+    .attc-userbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: #f0f4f8; border: 1px solid #e3e8ee; padding: 12px 16px; border-radius: 8px; margin-bottom: 1.5rem; }
+    .attc-userbar .attc-username { margin: 0; font-weight: 600; color: #2c3e50; }
+    .attc-userbar .attc-logout-btn { background: #e74c3c; color: #fff !important; text-decoration: none; padding: 8px 12px; border-radius: 6px; font-weight: 600; transition: background-color .2s; }
+    .attc-userbar .attc-logout-btn:hover { background: #ff6b61; }
+    #attc-payment-details.is-hidden, #attc-pricing-plans.is-hidden { display: none; }
+    .attc-payment-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 1.5rem; }
+    .attc-payment-column { border: 1px solid #e5e7eb; padding: 1.5rem; border-radius: 8px; background: #fff; text-align: center; }
+    .attc-payment-column h4 { margin-top: 0; margin-bottom: 1rem; }
+    .attc-qr-code img { max-width: 250px; height: auto; margin: 0 auto; }
+    .attc-bank-info { text-align: left; margin-top: 1rem; }
+    .attc-bank-info p { margin: 0.5rem 0; }    
     </style>
 
     <div class="attc-upgrade">
-        <h2>Nâng cấp tài khoản</h2>
-        <div class="attc-pricing">
-            <?php foreach ($plans as $plan): $amt = (int)($plan['amount'] ?? 0); $mins = $price_per_min > 0 ? floor($amt / $price_per_min) : 0; ?>
-            <div class="attc-card">
-                <div class="attc-card-title"><?php echo esc_html($plan['title']); ?></div>
-                <div class="attc-card-price">
-                    <strong><?php echo number_format($amt, 0, ',', '.'); ?>đ</strong>
-                    <span>≈ <?php echo (int)$mins; ?> phút</span>
+        <div class="attc-userbar">
+            <p class="attc-username"><strong><?php echo esc_html($display_name); ?></strong></p>
+            <a class="attc-logout-btn" href="<?php echo esc_url($logout_url); ?>">Đăng xuất</a>
+        </div>
+        <div id="attc-pricing-plans">
+            <h2>Nâng cấp tài khoản</h2>
+            <div class="attc-pricing">
+                <?php foreach ($plans as $plan): $amt = (int)($plan['amount'] ?? 0); $mins = $price_per_min > 0 ? floor($amt / $price_per_min) : 0; ?>
+                <div class="attc-card">
+                    <div class="attc-card-title"><?php echo esc_html($plan['title']); ?></div>
+                    <div class="attc-card-price">
+                        <strong><?php echo number_format($amt, 0, ',', '.'); ?>đ</strong>
+                        <span>≈ <?php echo (int)$mins; ?> phút</span>
+                    </div>
+                    <a class="attc-plan-select" href="#" data-amount="<?php echo (int)$amt; ?>" data-user-id="<?php echo (int) get_current_user_id(); ?>">Chọn gói này</a>
                 </div>
-                <a class="attc-plan-select" href="#" data-amount="<?php echo (int)$amt; ?>">Chọn gói này</a>
+                <?php endforeach; ?>
             </div>
-            <?php endforeach; ?>
+        </div>
+
+        <div id="attc-payment-details" class="is-hidden">
+            <button id="attc-back-to-plans">&larr; Quay lại chọn gói</button>
+            <h3>Chi tiết thanh toán</h3>
+
+            <div style="margin-bottom: 1rem; color: red;"><i>Lưu ý: Sau khi chuyển khoản thành công với đúng nội dung thanh toán, bạn hãy vào lại trang "Chuyển đổi giọng nói" để thực hiện chuyển đổi!</i></div>
+            <div class="attc-payment-columns">
+                <div class="attc-payment-column">
+                    <h4>Ví MoMo</h4>
+                    <div class="attc-qr-code" id="attc-momo-qr"></div>
+                    <p class="attc-qr-fallback">Mở MoMo, chọn "Quét Mã" và quét mã QR ở trên.</p>
+                </div>
+                <div class="attc-payment-column">
+                    <h4>Chuyển khoản Ngân hàng (ACB)</h4>
+                    <div class="attc-qr-code" id="attc-bank-qr"></div>
+                    <div class="attc-bank-info">
+                        <p><strong>Ngân hàng:</strong> <span id="bank-name">ACB</span></p>
+                        <p><strong>Chủ tài khoản:</strong> <span id="account-name">DINH CONG TOAN</span></p>
+                        <p><strong>Số tài khoản:</strong> <span id="account-number">240306539</span></p>
+                        <p><strong>Số tiền:</strong> <strong class="price-payment" id="bank-amount"></strong></p>
+                        <p><strong>Nội dung:</strong> <strong class="price-payment" id="bank-memo"></strong></p>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
     <?php
@@ -291,6 +358,15 @@ add_shortcode('attc_upgrade', 'attc_upgrade_shortcode');
 function attc_enqueue_payment_checker_script() {
     global $post;
     if (is_a($post, 'WP_Post') && has_shortcode($post->post_content, 'attc_upgrade')) {
+        // Enqueue CSS
+        $css_path = plugin_dir_path(__FILE__) . 'assets/css/frontend.css';
+        if (file_exists($css_path)) {
+            $css_url = plugins_url('assets/css/frontend.css', __FILE__);
+            $css_ver = filemtime($css_path);
+            wp_enqueue_style('attc-frontend', $css_url, [], $css_ver);
+        }
+
+        // Enqueue JS
         $script_path = plugin_dir_path(__FILE__) . 'assets/js/payment-checker.js';
         if (file_exists($script_path)) {
             $script_url = plugins_url('assets/js/payment-checker.js', __FILE__);
@@ -299,6 +375,7 @@ function attc_enqueue_payment_checker_script() {
             wp_localize_script('attc-payment-checker', 'attcPaymentData', [
                 'rest_url'      => esc_url_raw(rest_url('attc/v1/payment-status')),
                 'price_per_min' => (string) attc_get_price_per_minute(),
+                'user_id'       => get_current_user_id(),
             ]);
         }
     }
@@ -326,6 +403,21 @@ function attc_charge_wallet($user_id, $amount, $meta = []) {
     return true;
 }
 
+// Hàm kiểm tra xem người dùng đã từng nạp tiền chưa
+function attc_user_has_made_deposit($user_id) {
+    $history = get_user_meta($user_id, 'attc_wallet_history', true);
+    if (empty($history) || !is_array($history)) {
+        return false;
+    }
+    foreach ($history as $item) {
+        // Chỉ cần một giao dịch 'credit' từ webhook là đủ để xác nhận đã nạp tiền
+        if (isset($item['type'], $item['meta']['reason']) && $item['type'] === 'credit' && $item['meta']['reason'] === 'webhook_bank') {
+            return true;
+        }
+    }
+    return false;
+}
+
 function attc_handle_form_submission() {
     if ('POST' === $_SERVER['REQUEST_METHOD'] && isset($_POST['attc_nonce']) && wp_verify_nonce($_POST['attc_nonce'], 'attc_form_action')) {
         if (!is_user_logged_in()) {
@@ -336,50 +428,59 @@ function attc_handle_form_submission() {
             $file = $_FILES['audio_file'];
             $user_id = get_current_user_id();
             $price_per_minute = attc_get_price_per_minute();
-
+            
             require_once(ABSPATH . 'wp-admin/includes/media.php');
             $metadata = wp_read_audio_metadata($file['tmp_name']);
             $duration = !empty($metadata['length']) ? (int) $metadata['length'] : 0;
 
             if ($duration <= 0) {
                 set_transient('attc_form_error', 'Không thể xác định thời lượng file hoặc file không hợp lệ.', 30);
-                return;
+                attc_redirect_back();
             }
 
-            $balance = attc_get_wallet_balance($user_id);
-            $is_free_tier_eligible = ($balance <= 0);
-            $minutes_ceil = ceil($duration / 60);
+            $has_made_deposit = attc_user_has_made_deposit($user_id);
+            $is_free_tier_eligible = false;
+            $cost = 0;
+            $last_cost_message = '';
 
-            // === LOGIC LUỒNG MIỄN PHÍ ===
-            if ($is_free_tier_eligible) {
-                if ($duration > 120) { // Lớn hơn 2 phút (120 giây)
-                    set_transient('attc_form_error', 'Tài khoản miễn phí chỉ hỗ trợ file dưới 2 phút. Vui lòng nạp tiền để chuyển đổi file dài hơn.', 30);
-                    return;
+            // Logic Dùng thử vs Trả phí
+            if (!$has_made_deposit) {
+                // === LOGIC LUỒNG DÙNG THỬ ===
+                $today = current_time('Y-m-d');
+                $last_free_upload_date = get_user_meta($user_id, '_attc_last_free_upload_date', true);
+                $free_uploads_today = ($last_free_upload_date === $today) ? (int)get_user_meta($user_id, '_attc_free_uploads_today', true) : 0;
+
+                if ($free_uploads_today >= 1) {
+                    set_transient('attc_form_error', 'Bạn đã hết lượt tải lên miễn phí hôm nay. Vui lòng chọn "Nâng cấp" để chuyển đổi.', 30);
+                    attc_redirect_back();
+                }
+                if ($duration > 120) { // Giới hạn 2 phút
+                    set_transient('attc_form_error', 'File của bạn vượt quá 2 phút. Lượt dùng thử chỉ áp dụng cho file dưới 2 phút.', 30);
+                    attc_redirect_back();
                 }
 
-                $today_free_usage = (int) get_user_meta($user_id, 'attc_free_usage_' . date('Y-m-d'), true);
-                if ($today_free_usage >= 1) {
-                    set_transient('attc_form_error', 'Bạn đã hết lượt chuyển đổi miễn phí trong ngày hôm nay. Vui lòng quay lại vào ngày mai hoặc nạp tiền để tiếp tục.', 30);
-                    return;
-                }
+                $is_free_tier_eligible = true;
+                $cost = 0;
+                update_user_meta($user_id, '_attc_last_free_upload_date', $today);
+                update_user_meta($user_id, '_attc_free_uploads_today', $free_uploads_today + 1);
+                $last_cost_message = 'Chuyển đổi miễn phí thành công!';
 
-                // Đánh dấu đã sử dụng lượt miễn phí
-                update_user_meta($user_id, 'attc_free_usage_' . date('Y-m-d'), $today_free_usage + 1);
-                $last_cost_message = 'Đã sử dụng lượt miễn phí cho file ' . round($duration / 60, 2) . ' phút.';
-            
-            } else { // === LOGIC LUỒNG TRẢ PHÍ ===
+            } else {
+                // === LOGIC LUỒNG TRẢ PHÍ ===
+                $minutes_ceil = ceil($duration / 60);
                 $cost = $minutes_ceil * $price_per_minute;
+                $balance = attc_get_wallet_balance($user_id);
+
                 if ($balance < $cost) {
                     set_transient('attc_form_error', 'Số dư không đủ. Cần ' . number_format($cost) . 'đ, bạn chỉ có ' . number_format($balance) . 'đ. Vui lòng nạp thêm.', 30);
-                    return;
+                    attc_redirect_back();
                 }
 
-                // Sẽ cập nhật meta với transcript sau khi có kết quả
                 $charge_meta = ['reason' => 'audio_conversion', 'duration' => $duration, 'transcript' => ''];
                 $charge_result = attc_charge_wallet($user_id, $cost, $charge_meta);
-                if (is_wp_error($charge_result)) {
+                 if (is_wp_error($charge_result)) {
                     set_transient('attc_form_error', $charge_result->get_error_message(), 30);
-                    return;
+                    attc_redirect_back();
                 }
                 $last_cost_message = 'Chi phí cho file vừa rồi: ' . number_format($cost) . 'đ cho ' . $minutes_ceil . ' phút.';
             }
@@ -388,20 +489,14 @@ function attc_handle_form_submission() {
             $api_key = get_option('attc_openai_api_key');
             if (empty($api_key)) {
                 set_transient('attc_form_error', 'Lỗi: Quản trị viên chưa cấu hình OpenAI API Key.', 30);
-                // Hoàn lại tiền nếu có lỗi
-                if (!$is_free_tier_eligible) {
+                if (!$is_free_tier_eligible && $cost > 0) {
                     attc_credit_wallet($user_id, $cost, ['reason' => 'refund_api_key_missing']);
                 }
-                return;
+                attc_redirect_back();
             }
 
             $api_url = 'https://api.openai.com/v1/audio/transcriptions';
-
-            // === SỬ DỤNG cURL TRỰC TIẾP ĐỂ ĐẢM BẢO TÍNH CHÍNH XÁC ===
-            $headers = [
-                'Authorization: Bearer ' . $api_key,
-            ];
-
+            $headers = ['Authorization: Bearer ' . $api_key];
             $post_fields = [
                 'model' => 'whisper-1',
                 'file' => curl_file_create($file['tmp_name'], mime_content_type($file['tmp_name']), basename($file['name']))
@@ -422,8 +517,8 @@ function attc_handle_form_submission() {
 
             if ($curl_error) {
                 set_transient('attc_form_error', 'Lỗi cURL: ' . $curl_error, 30);
-                if (!$is_free_tier_eligible) { attc_credit_wallet($user_id, $cost, ['reason' => 'refund_curl_error']); }
-                return;
+                if (!$is_free_tier_eligible && $cost > 0) { attc_credit_wallet($user_id, $cost, ['reason' => 'refund_curl_error']); }
+                attc_redirect_back();
             }
 
             $response_body = json_decode($response_body_str, true);
@@ -431,20 +526,16 @@ function attc_handle_form_submission() {
             if ($response_code !== 200) {
                 $error_message = isset($response_body['error']['message']) ? $response_body['error']['message'] : 'Lỗi không xác định từ OpenAI.';
                 set_transient('attc_form_error', 'Lỗi từ OpenAI (Code: ' . $response_code . '): ' . $error_message, 30);
-                if (!$is_free_tier_eligible) { attc_credit_wallet($user_id, $cost, ['reason' => 'refund_openai_error']); }
-                return;
+                if (!$is_free_tier_eligible && $cost > 0) { attc_credit_wallet($user_id, $cost, ['reason' => 'refund_openai_error']); }
+                attc_redirect_back();
             }
 
             $transcript = $response_body['text'] ?? '';
 
-            set_transient('attc_form_success', $transcript, 30);
-            set_transient('attc_last_cost', $last_cost_message, 30);
-
-            // Cập nhật lịch sử giao dịch với nội dung transcript
+            // Cập nhật lịch sử giao dịch với nội dung transcript TRƯỚC khi chuyển hướng
             if (!$is_free_tier_eligible) {
                 $history = get_user_meta($user_id, 'attc_wallet_history', true);
                 if (!empty($history)) {
-                    // Tìm giao dịch cuối cùng và cập nhật nó
                     $last_key = array_key_last($history);
                     if (isset($history[$last_key]['meta']['reason']) && $history[$last_key]['meta']['reason'] === 'audio_conversion') {
                         $history[$last_key]['meta']['transcript'] = $transcript;
@@ -452,10 +543,16 @@ function attc_handle_form_submission() {
                     }
                 }
             }
+            
+            set_transient('attc_form_success', $transcript, 30);
+            set_transient('attc_last_cost', $last_cost_message, 30);
+
+            // Chuyển hướng để tải lại trang và cập nhật giao diện
+            attc_redirect_back();
         }
     }
 }
-add_action('template_redirect', 'attc_handle_form_submission');
+add_action('init', 'attc_handle_form_submission');
 
 function attc_form_shortcode() {
     if (!is_user_logged_in()) {
@@ -500,16 +597,54 @@ function attc_form_shortcode() {
         .attc-submit-btn:hover { background-color: #2ecc71; }
         .attc-submit-btn:disabled { background-color: #95a5a6; cursor: not-allowed; }
         .attc-result { margin-top: 2rem; } .attc-result h3 { margin-bottom: 0.5rem; } 
-        .attc-result-text { width: 100%; border-radius: 5px; border: 1px solid #dfe4e8; padding: 1rem; background-color: #fdfdfd; font-size: 1.1em; line-height: 1.6; min-height: 150px; }
-        .attc-result-actions { margin-top: 1rem; text-align: right; }
+.attc-result-text { width: 100%; border-radius: 5px; border: 1px solid #dfe4e8; padding: 1rem; background-color: #fdfdfd; font-size: 1.1em; line-height: 1.6; min-height: 150px; }
+.attc-result-actions { margin-top: 1.5rem; text-align: right; }
+.attc-result-actions .download-btn { 
+    display: inline-block;
+    background-color: #2980b9;
+    color: white !important;
+    padding: 0.8rem 1.5rem;
+    border-radius: 5px;
+    text-decoration: none;
+    font-weight: 500;
+    transition: background-color 0.2s;
+}
+.attc-result-actions .download-btn:hover { background-color: #3498db; }
+        .attc-result-actions { margin-top: 1.5rem; text-align: right; }
+        .attc-result-actions .download-btn { 
+            display: inline-block;
+            background-color: #2980b9;
+            color: white !important;
+            padding: 0.8rem 1.5rem;
+            border-radius: 5px;
+            text-decoration: none;
+            font-weight: 500;
+            transition: background-color 0.2s;
+        }
+        .attc-result-actions .download-btn:hover { background-color: #3498db; }
     </style>
 
+    <?php
+    $user_id = get_current_user_id();
+    $has_made_deposit = attc_user_has_made_deposit($user_id);
+    $today = current_time('Y-m-d');
+    $last_free_upload_date = get_user_meta($user_id, '_attc_last_free_upload_date', true);
+    $free_uploads_today = ($last_free_upload_date === $today) ? (int)get_user_meta($user_id, '_attc_free_uploads_today', true) : 0;
+    $free_uploads_left = max(0, 1 - $free_uploads_today);
+    $display_name = wp_get_current_user()->display_name;
+    ?>
     <div class="attc-converter-wrap">
         <div class="attc-wallet-box">
             <div class="attc-wallet-balance">
-                <p><strong><?php echo number_format($balance, 0, ',', '.'); ?>đ</strong></p>
-                <p class="attc-wallet-sub">Tương đương <strong><?php echo $max_minutes; ?></strong> phút chuyển đổi</p>
+                <?php if ($has_made_deposit): ?>
+                    <p><strong><?php echo number_format($balance, 0, ',', '.'); ?>đ</strong></p>
+                    <p class="attc-wallet-sub">Tương đương <strong><?php echo $max_minutes; ?></strong> phút chuyển đổi</p>
+                <?php else: ?>
+                    <p>Hôm nay bạn còn: <strong style="color: red; font-weight: bold; "><?php echo $free_uploads_left; ?></strong> lượt tải miễn phí</p>
+                    <p class="attc-wallet-sub">Mỗi ngày miễn phí chuyển đổi 1 file ghi âm < 2 phút</p>
+                <?php endif; ?>
             </div>
+            <p class="attc-user-name"><strong><?php echo esc_html($display_name); ?></strong></p>
             <div class="attc-wallet-actions">
                 <a href="/lich-su-chuyen-doi" class="history-btn">Lịch sử</a>
                 <a href="/nang-cap" class="upgrade-btn">Nâng cấp</a>
@@ -517,6 +652,13 @@ function attc_form_shortcode() {
             </div>
         </div>
 
+        <?php 
+        $success_notification = get_transient('attc_registration_success');
+        if ($success_notification) {
+            delete_transient('attc_registration_success');
+            echo '<div class="attc-alert attc-info">' . esc_html($success_notification) . '</div>';
+        }
+        ?>
         <?php if ($error_message): ?><div class="attc-alert attc-error"><?php echo esc_html($error_message); ?></div><?php endif; ?>
         <?php if ($last_cost): ?><div class="attc-alert attc-info"><?php echo esc_html($last_cost); ?></div><?php endif; ?>
 
@@ -793,8 +935,13 @@ function attc_login_form_shortcode() {
 }
 add_shortcode('attc_login_form', 'attc_login_form_shortcode');
 
-function attc_handle_login() {
-    if (isset($_POST['attc_login_submit']) && wp_verify_nonce($_POST['attc_login_nonce'], 'attc_login_action')) {
+function attc_handle_custom_login_form() {
+    // Chỉ thực thi khi form đăng nhập được gửi đi
+    if (!isset($_POST['attc_login_submit'])) {
+        return;
+    }
+
+    if (wp_verify_nonce($_POST['attc_login_nonce'], 'attc_login_action')) {
         
         $recaptcha_response = $_POST['g-recaptcha-response'] ?? '';
         if (!attc_verify_recaptcha($recaptcha_response)) {
@@ -820,7 +967,7 @@ function attc_handle_login() {
         }
     }
 }
-add_action('template_redirect', 'attc_handle_login');
+add_action('template_redirect', 'attc_handle_custom_login_form');
 
 
 // ---- Register Form ----
@@ -828,28 +975,26 @@ function attc_register_form_shortcode() {
     if (is_user_logged_in()) return '';
 
     $reg_errors = get_transient('attc_registration_errors');
-    if ($reg_errors) delete_transient('attc_registration_errors');
-
-    // Simple Captcha
-    $num1 = rand(1, 9);
-    $num2 = rand(1, 9);
-    set_transient('attc_captcha_sum', $num1 + $num2, 300); // Lưu tổng trong 5 phút
 
     ob_start();
     ?>
     <div class="attc-auth-form-wrap">
         <h2>Đăng ký tài khoản</h2>
-        <?php if ($reg_errors && is_array($reg_errors)):
+        <?php 
+        if ($reg_errors && is_array($reg_errors)) {
             echo '<div class="attc-auth-errors">';
             foreach ($reg_errors as $error) {
                 echo '<p>' . esc_html($error) . '</p>';
             }
             echo '</div>';
-        endif; ?>
+            delete_transient('attc_registration_errors'); // Xóa transient SAU KHI hiển thị
+        }
+        ?>
         <form action="" method="post">
             <div class="form-row"><label for="attc_reg_user">Tên người dùng</label><input type="text" name="reg_user" id="attc_reg_user" required></div>
             <div class="form-row"><label for="attc_reg_email">Email</label><input type="email" name="reg_email" id="attc_reg_email" required></div>
             <div class="form-row"><label for="attc_reg_pass">Mật khẩu</label><input type="password" name="reg_pass" id="attc_reg_pass" required></div>
+            <div class="form-row"><label for="attc_reg_pass2">Xác nhận mật khẩu</label><input type="password" name="reg_pass2" id="attc_reg_pass2" required></div>
             <?php $site_key = get_option('attc_recaptcha_site_key'); if (!empty($site_key)): ?>
             <div class="form-row g-recaptcha" data-sitekey="<?php echo esc_attr($site_key); ?>"></div>
             <?php endif; ?>
@@ -867,19 +1012,31 @@ function attc_register_form_shortcode() {
 }
 add_shortcode('attc_register_form', 'attc_register_form_shortcode');
 
-function attc_handle_registration() {
-    if (isset($_POST['attc_register_submit']) && wp_verify_nonce($_POST['attc_register_nonce'], 'attc_register_action')) {
+function attc_handle_custom_registration_form() {
+    // Chỉ thực thi khi form đăng ký được gửi đi
+    if (!isset($_POST['attc_register_submit'])) {
+        return;
+    }
+
+    if (wp_verify_nonce($_POST['attc_register_nonce'], 'attc_register_action')) {
         $username = sanitize_user($_POST['reg_user']);
         $email = sanitize_email($_POST['reg_email']);
         $password = $_POST['reg_pass'];
+        $password2 = $_POST['reg_pass2'];
         $recaptcha_response = $_POST['g-recaptcha-response'] ?? '';
         $errors = new WP_Error();
 
         if (!attc_verify_recaptcha($recaptcha_response)) {
             $errors->add('recaptcha_failed', 'Xác thực reCAPTCHA không thành công. Vui lòng thử lại.');
         }
-        if (empty($username) || empty($email) || empty($password)) {
+        if (empty($username) || empty($email) || empty($password) || empty($password2)) {
             $errors->add('field_required', 'Tất cả các trường là bắt buộc.');
+        }
+        if ($password !== $password2) {
+            $errors->add('password_mismatch', 'Mật khẩu xác nhận không khớp.');
+        }
+        if (strlen($password) < 6) {
+            $errors->add('password_length', 'Mật khẩu phải có ít nhất 6 ký tự.');
         }
         if (username_exists($username)) {
             $errors->add('username_exists', 'Tên người dùng này đã tồn tại.');
@@ -898,14 +1055,26 @@ function attc_handle_registration() {
         } else {
             $user_id = wp_create_user($username, $password, $email);
             if (!is_wp_error($user_id)) {
+                // Đặt transient thông báo thành công
+                set_transient('attc_registration_success', 'Đăng ký thành công! Bạn đã được tự động đăng nhập.', 30);
+                
+                // Tự động đăng nhập
                 wp_set_current_user($user_id, $username);
                 wp_set_auth_cookie($user_id, true, false);
                 wp_redirect(site_url('/chuyen-doi-giong-noi/'));
+                exit;
+            } else {
+                // Nếu wp_create_user thất bại, lấy lỗi và hiển thị
+                set_transient('attc_registration_errors', $user_id->get_error_messages(), 30);
+                wp_redirect(site_url('/dang-ky'));
                 exit;
             }
         }
     }
 }
+add_action('template_redirect', 'attc_handle_custom_registration_form');
+
+
 // ---- Lost & Reset Password Forms ----
 
 function attc_lost_password_form_shortcode() {
@@ -1026,17 +1195,15 @@ function attc_handle_reset_password() {
         $pass2 = $_POST['pass2'];
 
         $user = check_password_reset_key($key, $login);
-        $redirect_url = add_query_arg(['key' => $key, 'login' => $login], site_url('/dat-lai-mat-khau/'));
-
         if (is_wp_error($user)) {
-            set_transient('attc_password_reset_message', 'Link đặt lại mật khẩu không hợp lệ hoặc đã hết hạn.', 30);
-            wp_redirect($redirect_url);
+            set_transient('attc_password_reset_message', $user->get_error_message(), 30);
+            wp_redirect(add_query_arg(['key' => $key, 'login' => $login], site_url('/dat-lai-mat-khau/')));
             exit;
         }
 
         if ($pass1 !== $pass2) {
             set_transient('attc_password_reset_message', 'Hai mật khẩu không khớp.', 30);
-            wp_redirect($redirect_url);
+            wp_redirect(add_query_arg(['key' => $key, 'login' => $login], site_url('/dat-lai-mat-khau/')));
             exit;
         }
 
@@ -1047,9 +1214,6 @@ function attc_handle_reset_password() {
     }
 }
 add_action('template_redirect', 'attc_handle_reset_password');
-
-
-
 
 // ===== Plugin Settings Page =====
 

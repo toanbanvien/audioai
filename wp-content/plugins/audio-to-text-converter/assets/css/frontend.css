@@ -59,3 +59,5 @@
 .attc-file-info { margin: 10px 0 0; font-size: 14px; color: #0f172a; }
 .price-payment {font-size: 22px; color: #218838;font-weight: bold;}
 .attc-qr-fallback { color: #6b7280;font-style: italic; }
+.attc-user-name { margin: 0.3rem 0 0.6rem; color: #2c3e50; }
+button.attc-back-to-plans, button#attc-back-to-plans {background-color: #2271b1;margin-bottom: 1rem;}
