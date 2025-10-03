@@ -74,14 +74,27 @@ function attc_handle_download_transcript() {
   <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
 </Relationships>';
 
+        // Chuẩn hóa xuống dòng và tạo nhiều đoạn văn cho dễ đọc, áp dụng font Times New Roman, 16pt
+        $normalized = preg_replace("/\r\n|\r/", "\n", $transcript_content);
+        $lines = explode("\n", $normalized);
+        $paragraphs_xml = '';
+        $run_props = '<w:rPr>'
+            . '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman" w:eastAsia="Times New Roman" />'
+            . '<w:sz w:val="32"/><w:szCs w:val="32"/>' // 16pt = 32 half-points
+            . '</w:rPr>';
+        foreach ($lines as $ln) {
+            $text = htmlspecialchars($ln, ENT_QUOTES | ENT_XML1, 'UTF-8');
+            if ($text === '') {
+                $paragraphs_xml .= "<w:p/>"; // dòng trống
+            } else {
+                $paragraphs_xml .= '<w:p><w:r>' . $run_props . '<w:t xml:space="preserve">' . $text . '</w:t></w:r></w:p>';
+            }
+        }
+
         $document_xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
   <w:body>
-    <w:p>
-      <w:r>
-        <w:t>' . htmlspecialchars($transcript_content, ENT_QUOTES | ENT_XML1, 'UTF-8') . '</w:t>
-      </w:r>
-    </w:p>
+    ' . $paragraphs_xml . '
   </w:body>
 </w:document>';
 
@@ -321,7 +334,8 @@ add_action('rest_api_init', function () {
 
 
 function attc_get_price_per_minute() {
-    return 500; // Example: 500 VND per minute
+    $price = (int) get_option('attc_price_per_minute', 500);
+    return max(0, $price);
 }
 
 // ===== Upgrade Page Shortcode =====
@@ -330,6 +344,7 @@ function attc_upgrade_shortcode() {
         return '<div class="attc-auth-prompt"><p>Vui lòng <a href="' . esc_url(site_url('/dang-nhap')) . '">đăng nhập</a> hoặc <a href="' . esc_url(site_url('/dang-ky')) . '">đăng ký</a> để sử dụng chức năng này.</p></div>';
     }
     $display_name = wp_get_current_user()->display_name;
+    $free_threshold = (int) get_option('attc_free_threshold', 500);
     $logout_url = wp_logout_url(get_permalink());
     if (!is_user_logged_in()) {
         return '<div class="attc-auth-prompt"><p>Vui lòng <a href="' . esc_url(site_url('/dang-nhap')) . '">đăng nhập</a> hoặc <a href="' . esc_url(site_url('/dang-ky')) . '">đăng ký</a> để sử dụng chức năng này.</p></div>';
@@ -694,6 +709,15 @@ function attc_handle_form_submission() {
         if (isset($_FILES['audio_file']) && $_FILES['audio_file']['error'] === UPLOAD_ERR_OK) {
             $file = $_FILES['audio_file'];
             $user_id = get_current_user_id();
+
+            // Concurrency lock (mutex) per user to avoid multiple parallel API calls
+            $lock_key = 'attc_processing_lock_' . $user_id;
+            if (get_transient($lock_key)) {
+                set_transient('attc_form_error', 'Yêu cầu trước của bạn đang được xử lý. Vui lòng đợi hoàn tất trước khi gửi thêm.', 20);
+                attc_redirect_back();
+            }
+            // Set lock for 10 minutes max
+            set_transient($lock_key, 1, 10 * MINUTE_IN_SECONDS);
             $price_per_minute = attc_get_price_per_minute();
             
             require_once(ABSPATH . 'wp-admin/includes/media.php');
@@ -702,16 +726,19 @@ function attc_handle_form_submission() {
 
             if ($duration <= 0) {
                 set_transient('attc_form_error', 'Không thể xác định thời lượng file hoặc file không hợp lệ.', 30);
+                delete_transient($lock_key);
                 attc_redirect_back();
             }
 
-            $has_made_deposit = attc_user_has_made_deposit($user_id);
+            // Rule miễn phí chỉ áp dụng khi số dư ví rất thấp (<= ngưỡng cấu hình)
+            $balance = attc_get_wallet_balance($user_id);
+            $free_threshold = (int) get_option('attc_free_threshold', 500);
             $is_free_tier_eligible = false;
             $cost = 0;
             $last_cost_message = '';
 
             // Logic Dùng thử vs Trả phí
-            if (!$has_made_deposit) {
+            if ($balance <= $free_threshold) {
                 // === LOGIC LUỒNG DÙNG THỬ ===
                 $today = current_time('Y-m-d');
                 $last_free_upload_date = get_user_meta($user_id, '_attc_last_free_upload_date', true);
@@ -719,10 +746,12 @@ function attc_handle_form_submission() {
 
                 if ($free_uploads_today >= 1) {
                     set_transient('attc_form_error', 'Bạn đã hết lượt tải lên miễn phí hôm nay. Vui lòng chọn "Nâng cấp" để chuyển đổi.', 30);
+                    delete_transient($lock_key);
                     attc_redirect_back();
                 }
                 if ($duration > 120) { // Giới hạn 2 phút
                     set_transient('attc_form_error', 'File của bạn vượt quá 2 phút. Lượt dùng thử chỉ áp dụng cho file dưới 2 phút.', 30);
+                    delete_transient($lock_key);
                     attc_redirect_back();
                 }
 
@@ -736,10 +765,10 @@ function attc_handle_form_submission() {
                 // === LOGIC LUỒNG TRẢ PHÍ ===
                 $minutes_ceil = ceil($duration / 60);
                 $cost = $minutes_ceil * $price_per_minute;
-                $balance = attc_get_wallet_balance($user_id);
 
                 if ($balance < $cost) {
                     set_transient('attc_form_error', 'Số dư không đủ. Cần ' . number_format($cost) . 'đ, bạn chỉ có ' . number_format($balance) . 'đ. Vui lòng nạp thêm.', 30);
+                    delete_transient($lock_key);
                     attc_redirect_back();
                 }
 
@@ -747,6 +776,7 @@ function attc_handle_form_submission() {
                 $charge_result = attc_charge_wallet($user_id, $cost, $charge_meta);
                  if (is_wp_error($charge_result)) {
                     set_transient('attc_form_error', $charge_result->get_error_message(), 30);
+                    delete_transient($lock_key);
                     attc_redirect_back();
                 }
                 $last_cost_message = 'Chi phí cho file vừa rồi: ' . number_format($cost) . 'đ cho ' . $minutes_ceil . ' phút.';
@@ -759,6 +789,7 @@ function attc_handle_form_submission() {
                 if (!$is_free_tier_eligible && $cost > 0) {
                     attc_credit_wallet($user_id, $cost, ['reason' => 'refund_api_key_missing']);
                 }
+                delete_transient($lock_key);
                 attc_redirect_back();
             }
 
@@ -785,6 +816,7 @@ function attc_handle_form_submission() {
             if ($curl_error) {
                 set_transient('attc_form_error', 'Lỗi cURL: ' . $curl_error, 30);
                 if (!$is_free_tier_eligible && $cost > 0) { attc_credit_wallet($user_id, $cost, ['reason' => 'refund_curl_error']); }
+                delete_transient($lock_key);
                 attc_redirect_back();
             }
 
@@ -794,6 +826,7 @@ function attc_handle_form_submission() {
                 $error_message = isset($response_body['error']['message']) ? $response_body['error']['message'] : 'Lỗi không xác định từ OpenAI.';
                 set_transient('attc_form_error', 'Lỗi từ OpenAI (Code: ' . $response_code . '): ' . $error_message, 30);
                 if (!$is_free_tier_eligible && $cost > 0) { attc_credit_wallet($user_id, $cost, ['reason' => 'refund_openai_error']); }
+                delete_transient($lock_key);
                 attc_redirect_back();
             }
 
@@ -815,6 +848,7 @@ function attc_handle_form_submission() {
             set_transient('attc_last_cost', $last_cost_message, 30);
 
             // Chuyển hướng để tải lại trang và cập nhật giao diện
+            delete_transient($lock_key);
             attc_redirect_back();
         }
     }
@@ -889,6 +923,15 @@ function attc_form_shortcode() {
             transition: background-color 0.2s;
         }
         .attc-result-actions .download-btn:hover { background-color: #3498db; }
+        /* Progress UI */
+        .is-hidden { display: none; }
+        .attc-progress { margin-top: 14px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; }
+        .attc-progress-label { display:flex; align-items:center; gap:8px; color:#0f172a; font-weight:600; margin-bottom:8px; }
+        .attc-spinner { width:16px; height:16px; border:2px solid #93c5fd; border-top-color:#1d4ed8; border-radius:50%; animation: attc-spin 0.8s linear infinite; }
+        @keyframes attc-spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
+        .attc-progress-outer { width:100%; height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; }
+        .attc-progress-inner { height:100%; width:0%; background:#1d4ed8; transition: width .3s ease; }
+        .attc-progress-text { font-size:12px; color:#334155; margin-top:6px; }
     </style>
 
     <?php
@@ -903,12 +946,12 @@ function attc_form_shortcode() {
     <div class="attc-converter-wrap">
         <div class="attc-wallet-box">
             <div class="attc-wallet-balance">
-                <?php if ($has_made_deposit): ?>
+                <?php if ($balance > $free_threshold): ?>
                     <p><strong><?php echo number_format($balance, 0, ',', '.'); ?>đ</strong></p>
                     <p class="attc-wallet-sub">Tương đương <strong><?php echo $max_minutes; ?></strong> phút chuyển đổi</p>
                 <?php else: ?>
-                    <p>Hôm nay bạn còn: <strong style="color: red; font-weight: bold; "><?php echo $free_uploads_left; ?></strong> lượt tải miễn phí</p>
-                    <p class="attc-wallet-sub">Mỗi ngày miễn phí chuyển đổi 1 file ghi âm < 2 phút</p>
+                    <p>Hôm nay bạn còn: <strong style="color: red; font-weight: bold; "><?php echo $free_uploads_left; ?></strong> lượt chuyển đổi miễn phí</p>
+                    <p class="attc-wallet-sub">Mỗi ngày miễn phí chuyển đổi 1 File ghi âm < 2 phút</p>
                 <?php endif; ?>
             </div>
             <p class="attc-user-name"><strong><?php echo esc_html($display_name); ?></strong></p>
@@ -918,6 +961,10 @@ function attc_form_shortcode() {
                 <a href="<?php echo wp_logout_url(get_permalink()); ?>" class="logout-btn">Đăng xuất</a>
             </div>
         </div>
+
+        <p class="attc-wallet-sub" style="margin-top:-8px; margin-bottom: 16px; color:#5a6e82;">
+            Đơn giá hiện tại: <strong><?php echo number_format((int)$price_per_minute, 0, ',', '.'); ?> đ/phút</strong>
+        </p>
 
         <?php 
         $success_notification = get_transient('attc_registration_success');
@@ -938,6 +985,11 @@ function attc_form_shortcode() {
                 <div id="attc-file-info"></div>
             </div>
             <button type="submit" class="attc-submit-btn" id="attc-submit-button" disabled>Chuyển đổi</button>
+            <div id="attc-progress" class="attc-progress is-hidden" aria-live="polite">
+                <div class="attc-progress-label"><span class="attc-spinner" aria-hidden="true"></span><span>Đang xử lý...</span></div>
+                <div class="attc-progress-outer"><div class="attc-progress-inner" id="attc-progress-bar"></div></div>
+                <div class="attc-progress-text" id="attc-progress-text">Bắt đầu xử lý (0%)</div>
+            </div>
         </form>
 
         <?php if ($success_message): 
@@ -960,7 +1012,7 @@ function attc_form_shortcode() {
             <div class="attc-result-text"><?php echo nl2br(esc_html($success_message)); ?></div>
             <?php if ($download_link): ?>
             <div class="attc-result-actions">
-                <a href="<?php echo esc_url($download_link); ?>" class="download-btn">Tải về (.docx)</a>
+                <a href="<?php echo esc_url($download_link); ?>" class="download-btn">Tải kết quả (.docx)</a>
             </div>
             <?php endif; ?>
         </div>
@@ -974,6 +1026,10 @@ function attc_form_shortcode() {
         const fileInfo = document.getElementById('attc-file-info');
         const submitButton = document.getElementById('attc-submit-button');
         const uploadForm = document.getElementById('attc-upload-form');
+        const progressWrap = document.getElementById('attc-progress');
+        const progressBar = document.getElementById('attc-progress-bar');
+        const progressText = document.getElementById('attc-progress-text');
+        let progressTimer = null;
 
         if (!dropZone || !uploadForm) return;
 
@@ -981,6 +1037,10 @@ function attc_form_shortcode() {
             if (submitButton.disabled) return;
             submitButton.disabled = true;
             submitButton.textContent = 'Đang xử lý, vui lòng chờ...';
+            if (progressWrap) {
+                progressWrap.classList.remove('is-hidden');
+                startFakeProgress();
+            }
         });
 
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
@@ -1019,7 +1079,34 @@ function attc_form_shortcode() {
                 const file = files[0];
                 fileInfo.textContent = `File đã chọn: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`;
                 submitButton.disabled = false;
+                resetFakeProgress();
             }
+        }
+
+        function startFakeProgress() {
+            let p = 0;
+            updateProgress(p);
+            clearInterval(progressTimer);
+            progressTimer = setInterval(() => {
+                // Tăng chậm dần đến 90%, chờ server trả về sẽ reload trang
+                if (p < 90) {
+                    const step = p < 50 ? 4 : (p < 75 ? 2 : 1);
+                    p = Math.min(90, p + step);
+                    updateProgress(p);
+                }
+            }, 500);
+        }
+
+        function resetFakeProgress() {
+            if (!progressWrap) return;
+            progressWrap.classList.add('is-hidden');
+            updateProgress(0);
+            clearInterval(progressTimer);
+        }
+
+        function updateProgress(val) {
+            if (progressBar) progressBar.style.width = val + '%';
+            if (progressText) progressText.textContent = `Đang xử lý (${val}%)`;
         }
     });
     </script>
@@ -1551,6 +1638,27 @@ function attc_settings_init() {
         'attc-settings',
         'attc_recaptcha_section',
         ['name' => 'attc_recaptcha_secret_key', 'type' => 'password', 'desc' => 'Lấy từ trang quản trị Google reCAPTCHA.']
+    );
+
+    // Pricing/Rules Section
+    register_setting('attc_settings', 'attc_price_per_minute');
+    register_setting('attc_settings', 'attc_free_threshold');
+    add_settings_section('attc_pricing_section', 'Cài đặt Quy tắc & Giá', null, 'attc-settings');
+    add_settings_field(
+        'attc_price_per_minute',
+        'Đơn giá mỗi phút (VND/phút)',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_pricing_section',
+        ['name' => 'attc_price_per_minute', 'type' => 'number', 'desc' => 'Ví dụ 500 (đồng/phút). Dùng để tính phí chuyển đổi.']
+    );
+    add_settings_field(
+        'attc_free_threshold',
+        'Ngưỡng miễn phí (VND)',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_pricing_section',
+        ['name' => 'attc_free_threshold', 'type' => 'number', 'desc' => 'Nếu số dư ví <= giá trị này thì áp dụng lượt miễn phí (mặc định 500).']
     );
 }
 add_action('admin_init', 'attc_settings_init');
