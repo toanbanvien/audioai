@@ -46,16 +46,59 @@ function attc_handle_download_transcript() {
             wp_die('Không tìm thấy nội dung.');
         }
 
+        // Tạo file .docx hợp lệ bằng ZipArchive
+        if (!class_exists('ZipArchive')) {
+            wp_die('Máy chủ không hỗ trợ ZipArchive, không thể tạo file .docx');
+        }
+
+        $tmp_file = tempnam(sys_get_temp_dir(), 'attc_docx_');
+        $zip = new ZipArchive();
+        if ($zip->open($tmp_file, ZipArchive::OVERWRITE) !== true) {
+            wp_die('Không thể tạo file nén tạm thời.');
+        }
+
+        $content_types = '[Content_Types].xml';
+        $rels_dir = '_rels/.rels';
+        $word_document = 'word/document.xml';
+        $word_rels_dir = 'word/_rels/document.xml.rels';
+
+        $content_types_xml = '<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>';
+
+        $rels_xml = '<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>';
+
+        $document_xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p>
+      <w:r>
+        <w:t>' . htmlspecialchars($transcript_content, ENT_QUOTES | ENT_XML1, 'UTF-8') . '</w:t>
+      </w:r>
+    </w:p>
+  </w:body>
+</w:document>';
+
+        $document_rels_xml = '<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+
+        $zip->addFromString($content_types, $content_types_xml);
+        $zip->addFromString($rels_dir, $rels_xml);
+        $zip->addFromString($word_document, $document_xml);
+        $zip->addFromString($word_rels_dir, $document_rels_xml);
+        $zip->close();
+
         header('Content-Type: application/vnd.openxmlformats-officedocument.wordprocessingml.document');
         header('Content-Disposition: attachment; filename="transcript-' . $timestamp . '.docx"');
-
-        // Tạo nội dung file DOCX đơn giản bằng XML
-        $docx_content = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' . 
-                        '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' . 
-                        '<w:body><w:p><w:r><w:t>' . esc_html($transcript_content) . '</w:t></w:r></w:p></w:body>' . 
-                        '</w:document>';
-
-        echo $docx_content;
+        header('Content-Length: ' . filesize($tmp_file));
+        readfile($tmp_file);
+        @unlink($tmp_file);
         exit;
     }
 }
@@ -113,6 +156,37 @@ add_filter('attc_parse_bank_webhook', function($parsed, $raw){
             if (isset($tx['description'])) { $parsed['note'] = (string) $tx['description']; }
             if (isset($tx['tid'])) { $parsed['txid'] = (string) $tx['tid']; }
             elseif (isset($tx['reference'])) { $parsed['txid'] = (string) $tx['reference']; }
+        }
+    }
+
+    // Handle manual debit
+    if (!empty($_POST['attc_manual_debit'])) {
+        check_admin_referer('attc_manual_debit_action', 'attc_manual_debit_nonce');
+
+        $user_identifier = sanitize_text_field($_POST['attc_user_identifier_debit'] ?? '');
+        $amount = (int) ($_POST['attc_amount_debit'] ?? 0);
+
+        $user = false;
+        if (is_numeric($user_identifier)) {
+            $user = get_user_by('id', (int)$user_identifier);
+        }
+        if (!$user) { $user = get_user_by('email', $user_identifier); }
+        if (!$user) { $user = get_user_by('login', $user_identifier); }
+
+        if (!$user || $amount <= 0) {
+            $message .= '<div class="notice notice-error"><p>Vui lòng nhập người dùng hợp lệ và số tiền > 0 để trừ.</p></div>';
+        } else {
+            $uid = (int)$user->ID;
+            $res = attc_charge_wallet($uid, $amount, [
+                'reason' => 'admin_debit',
+                'note'   => 'Manual debit by admin',
+                'admin'  => get_current_user_id(),
+            ]);
+            if (is_wp_error($res)) {
+                $message .= '<div class="notice notice-error"><p>Không thể trừ tiền: ' . esc_html($res->get_error_message()) . '</p></div>';
+            } else {
+                $message .= '<div class="notice notice-success"><p>Đã trừ ' . number_format($amount) . 'đ từ ví user #' . $uid . ' (' . esc_html($user->user_email) . ').</p></div>';
+            }
         }
     }
     return $parsed;
@@ -381,6 +455,199 @@ function attc_enqueue_payment_checker_script() {
     }
 }
 add_action('wp_enqueue_scripts', 'attc_enqueue_payment_checker_script');
+
+
+// ===== ADMIN: Wallet Dashboard & Manual Top-up =====
+add_action('admin_menu', 'attc_register_admin_pages');
+function attc_register_admin_pages() {
+    add_menu_page(
+        'AudioAI Wallet',
+        'AudioAI Wallet',
+        'manage_options',
+        'attc-wallet',
+        'attc_render_wallet_dashboard',
+        'dashicons-money-alt',
+        58
+    );
+}
+
+function attc_render_wallet_dashboard() {
+    if (!current_user_can('manage_options')) {
+        wp_die('Bạn không có quyền truy cập trang này.');
+    }
+
+    // Handle manual top-up
+    $message = '';
+    if (!empty($_POST['attc_manual_topup'])) {
+        check_admin_referer('attc_manual_topup_action', 'attc_manual_topup_nonce');
+
+        $user_identifier = sanitize_text_field($_POST['attc_user_identifier'] ?? '');
+        $amount = (int) ($_POST['attc_amount'] ?? 0);
+
+        $user = false;
+        if (is_numeric($user_identifier)) {
+            $user = get_user_by('id', (int)$user_identifier);
+        }
+        if (!$user) {
+            $user = get_user_by('email', $user_identifier);
+        }
+        if (!$user) {
+            $user = get_user_by('login', $user_identifier);
+        }
+
+        if (!$user || $amount <= 0) {
+            $message = '<div class="notice notice-error"><p>Vui lòng nhập người dùng hợp lệ và số tiền > 0.</p></div>';
+        } else {
+            $uid = (int)$user->ID;
+            $res = attc_credit_wallet($uid, $amount, [
+                'reason' => 'admin_topup',
+                'note'   => 'Manual top-up by admin',
+                'admin'  => get_current_user_id(),
+            ]);
+            if (is_wp_error($res)) {
+                $message = '<div class="notice notice-error"><p>Lỗi nạp tiền: ' . esc_html($res->get_error_message()) . '</p></div>';
+            } else {
+                $message = '<div class="notice notice-success"><p>Đã nạp ' . number_format($amount) . 'đ vào ví của user #' . $uid . ' (' . esc_html($user->user_email) . ').</p></div>';
+            }
+        }
+    }
+
+    $price_per_min = (int) attc_get_price_per_minute();
+
+    // Search/filter + Pagination
+    $q = isset($_GET['q']) ? sanitize_text_field(wp_unslash($_GET['q'])) : '';
+    $per_page = max(1, (int) apply_filters('attc_admin_wallet_per_page', 20));
+    $paged = isset($_GET['paged']) ? max(1, (int) $_GET['paged']) : 1;
+    $offset = ($paged - 1) * $per_page;
+
+    $user_query_args = [
+        'fields' => ['ID', 'display_name', 'user_email'],
+        'number' => $per_page,
+        'offset' => $offset,
+    ];
+    if ($q !== '') {
+        $user_query_args['search'] = '*' . $q . '*';
+        $user_query_args['search_columns'] = ['user_login', 'user_email', 'display_name'];
+    }
+    $user_query = new WP_User_Query($user_query_args);
+    $users = $user_query->get_results();
+    $total_users = (int) $user_query->get_total();
+    $total_pages = max(1, (int) ceil($total_users / $per_page));
+
+    $rows = [];
+    $depositor_count = 0;
+    foreach ($users as $u) {
+        $uid = (int)$u->ID;
+        $balance = attc_get_wallet_balance($uid);
+        $mins = $price_per_min > 0 ? floor($balance / $price_per_min) : 0;
+        $has_deposit = attc_user_has_made_deposit($uid);
+        if ($has_deposit) { $depositor_count++; }
+        $rows[] = [
+            'id' => $uid,
+            'name' => $u->display_name,
+            'email' => $u->user_email,
+            'balance' => $balance,
+            'minutes' => $mins,
+            'has_deposit' => $has_deposit,
+        ];
+    }
+
+    // Sort by balance desc
+    usort($rows, function($a, $b){ return $b['balance'] <=> $a['balance']; });
+
+    echo '<div class="wrap"><h1>AudioAI Wallet</h1>';
+    if ($message) echo $message;
+
+    echo '<h2>Thống kê</h2>';
+    echo '<p>- Người dùng đã từng nạp: <strong>' . (int)$depositor_count . '</strong></p>';
+    echo '<p>- Đơn giá mỗi phút: <strong>' . number_format($price_per_min) . 'đ/phút</strong></p>';
+
+    echo '<h2>Nạp tiền thủ công</h2>';
+    echo '<form method="post" style="margin-bottom:20px;">';
+    wp_nonce_field('attc_manual_topup_action', 'attc_manual_topup_nonce');
+    echo '<input type="hidden" name="attc_manual_topup" value="1" />';
+    echo '<table class="form-table"><tbody>';
+    echo '<tr><th scope="row"><label for="attc_user_identifier">User (ID / Email / Username)</label></th>';
+    echo '<td><input name="attc_user_identifier" id="attc_user_identifier" type="text" class="regular-text" required placeholder="ví dụ: 123 hoặc user@example.com"></td></tr>';
+    echo '<tr><th scope="row"><label for="attc_amount">Số tiền (VND)</label></th>';
+    echo '<td><input name="attc_amount" id="attc_amount" type="number" min="1" step="1" required></td></tr>';
+    echo '</tbody></table>';
+    submit_button('Nạp tiền');
+    echo '</form>';
+
+    echo '<h2>Trừ tiền thủ công</h2>';
+    echo '<form method="post" style="margin-bottom:20px;">';
+    wp_nonce_field('attc_manual_debit_action', 'attc_manual_debit_nonce');
+    echo '<input type="hidden" name="attc_manual_debit" value="1" />';
+    echo '<table class="form-table"><tbody>';
+    echo '<tr><th scope="row"><label for="attc_user_identifier_debit">User (ID / Email / Username)</label></th>';
+    echo '<td><input name="attc_user_identifier_debit" id="attc_user_identifier_debit" type="text" class="regular-text" required placeholder="ví dụ: 123 hoặc user@example.com"></td></tr>';
+    echo '<tr><th scope="row"><label for="attc_amount_debit">Số tiền (VND)</label></th>';
+    echo '<td><input name="attc_amount_debit" id="attc_amount_debit" type="number" min="1" step="1" required></td></tr>';
+    echo '</tbody></table>';
+    submit_button('Trừ tiền', 'delete');
+    echo '</form>';
+
+    // Search form
+    echo '<h2>Tìm kiếm người dùng</h2>';
+    $base_url = admin_url('admin.php?page=attc-wallet');
+    echo '<form method="get" style="margin-bottom:12px;">';
+    echo '<input type="hidden" name="page" value="attc-wallet" />';
+    echo '<input type="search" name="q" value="' . esc_attr($q) . '" class="regular-text" placeholder="Email, Username hoặc Tên hiển thị"> ';
+    submit_button('Tìm', 'secondary', '', false);
+    echo ' <a class="button" href="' . esc_url($base_url) . '">Xóa lọc</a>';
+    echo '</form>';
+
+    echo '<h2>Danh sách ví người dùng</h2>';
+    // Pagination (top)
+    if ($total_pages > 1) {
+        $pagination = paginate_links([
+            'base'      => add_query_arg(['page' => 'attc-wallet', 'q' => $q, 'paged' => '%#%'], admin_url('admin.php')),
+            'format'    => '',
+            'current'   => $paged,
+            'total'     => $total_pages,
+            'prev_text' => '« Trước',
+            'next_text' => 'Sau »',
+            'type'      => 'list',
+        ]);
+        if ($pagination) {
+            echo $pagination;
+        }
+        $start_i = $offset + 1;
+        $end_i = $offset + count($users);
+        echo '<p>Hiển thị <strong>' . (int)$start_i . '–' . (int)$end_i . '</strong> trên tổng <strong>' . (int)$total_users . '</strong> người dùng</p>';
+    }
+    echo '<table class="widefat fixed striped"><thead><tr>';
+    echo '<th width="60">User ID</th><th>Tên</th><th>Email</th><th width="140">Số dư (đ)</th><th width="120">Phút khả dụng</th><th width="140">Đã từng nạp?</th>';
+    echo '</tr></thead><tbody>';
+    foreach ($rows as $r) {
+        echo '<tr>';
+        echo '<td>' . (int)$r['id'] . '</td>';
+        echo '<td>' . esc_html($r['name']) . '</td>';
+        echo '<td>' . esc_html($r['email']) . '</td>';
+        echo '<td>' . number_format((int)$r['balance']) . '</td>';
+        echo '<td>' . (int)$r['minutes'] . '</td>';
+        echo '<td>' . ($r['has_deposit'] ? '<span style="color:green;font-weight:600;">Có</span>' : 'Chưa') . '</td>';
+        echo '</tr>';
+    }
+    echo '</tbody></table>';
+    // Pagination (bottom)
+    if ($total_pages > 1) {
+        $pagination = paginate_links([
+            'base'      => add_query_arg(['page' => 'attc-wallet', 'q' => $q, 'paged' => '%#%'], admin_url('admin.php')),
+            'format'    => '',
+            'current'   => $paged,
+            'total'     => $total_pages,
+            'prev_text' => '« Trước',
+            'next_text' => 'Sau »',
+            'type'      => 'list',
+        ]);
+        if ($pagination) {
+            echo $pagination;
+        }
+    }
+    echo '</div>';
+}
 
 
 // ===== Audio Conversion Form Shortcode =====
@@ -693,7 +960,7 @@ function attc_form_shortcode() {
             <div class="attc-result-text"><?php echo nl2br(esc_html($success_message)); ?></div>
             <?php if ($download_link): ?>
             <div class="attc-result-actions">
-                <a href="<?php echo esc_url($download_link); ?>" class="upgrade-btn">Tải về (.docx)</a>
+                <a href="<?php echo esc_url($download_link); ?>" class="download-btn">Tải về (.docx)</a>
             </div>
             <?php endif; ?>
         </div>

@@ -60,16 +60,16 @@ function attc_history_shortcode() {
             <table class="attc-history-table">
                 <thead>
                     <tr>
-                        <th>Ngày</th>
-                        <th>Loại</th>
-                        <th>Số tiền</th>
-                        <th>Chi tiết</th>
+                        <th width="15%">Ngày</th>
+                        <th width="15%">Loại</th>
+                        <th width="15%">Số tiền</th>
+                        <th width="40%">Chi tiết</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php foreach ($history as $item): ?>
                     <tr>
-                        <td><?php echo date('d/m/Y H:i', $item['timestamp']); ?></td>
+                        <td><?php echo wp_date('d/m/Y H:i', $item['timestamp']); ?></td>
                         <td>
                             <?php 
                                 $type = $item['type'] ?? 'N/A';
