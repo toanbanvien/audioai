@@ -10,6 +10,36 @@ if (!defined('ABSPATH')) {
     exit; // Chặn truy cập trực tiếp
 }
 
+// Hậu xử lý văn bản: sửa lỗi chính tả/dấu tiếng Việt bằng Chat Completions
+function attc_vi_correct_text($text, $api_key) {
+    if (empty($api_key) || !is_string($text) || $text === '') return $text;
+    $endpoint = 'https://api.openai.com/v1/chat/completions';
+    $headers = [
+        'Authorization' => 'Bearer ' . $api_key,
+        'Content-Type'  => 'application/json',
+    ];
+    $payload = [
+        'model' => 'gpt-3.5-turbo',
+        'temperature' => 0,
+        'messages' => [
+            [ 'role' => 'system', 'content' => 'Bạn là trợ lý biên tập tiếng Việt. Hãy chuẩn hoá chính tả, dấu câu, giữ nguyên nội dung, không thêm/bớt ý.' ],
+            [ 'role' => 'user', 'content' => "Hãy chỉnh sửa chính tả tiếng Việt, thêm dấu đầy đủ, giữ nguyên ý nghĩa và định dạng cơ bản (xuống dòng). Chỉ trả về đoạn văn đã chỉnh sửa, không kèm giải thích.\n\n---\n\n" . $text ],
+        ],
+        'max_tokens' => 2048,
+    ];
+    $resp = wp_remote_post($endpoint, [
+        'timeout' => 60,
+        'headers' => $headers,
+        'body'    => wp_json_encode($payload),
+    ]);
+    if (is_wp_error($resp)) return $text;
+    $code = wp_remote_retrieve_response_code($resp);
+    $body = json_decode(wp_remote_retrieve_body($resp), true);
+    if ($code !== 200 || empty($body['choices'][0]['message']['content'])) return $text;
+    $out = (string) $body['choices'][0]['message']['content'];
+    return trim($out) !== '' ? $out : $text;
+}
+
 // Chuyển hướng an toàn về trang trước hoặc trang chuyển đổi nếu thiếu Referer
 function attc_redirect_back() {
     $url = wp_get_referer();
@@ -330,7 +360,56 @@ add_action('rest_api_init', function () {
         'callback' => 'attc_handle_webhook_bank',
         'permission_callback' => '__return_true',
     ]);
+
+    // SSE: stream thông báo nạp thành công theo thời gian thực
+    register_rest_route('attc/v1', '/payment-stream', [
+        'methods' => 'GET',
+        'callback' => 'attc_payment_stream',
+        'permission_callback' => '__return_true',
+    ]);
 });
+
+// SSE endpoint: trả về sự kiện "payment" khi phát hiện nạp thành công trong 60s, fallback client sẽ polling
+function attc_payment_stream(\WP_REST_Request $request) {
+    if (!is_user_logged_in()) {
+        status_header(200);
+        header('Content-Type: text/event-stream');
+        header('Cache-Control: no-cache');
+        echo ": not_logged_in\n\n";
+        flush();
+        return;
+    }
+
+    $user_id = get_current_user_id();
+    $transient_key = 'attc_payment_success_' . $user_id;
+
+    ignore_user_abort(true);
+    @set_time_limit(0);
+    status_header(200);
+    header('Content-Type: text/event-stream');
+    header('Cache-Control: no-cache');
+    header('X-Accel-Buffering: no'); // với nginx
+
+    $start = time();
+    while (time() - $start < 60) { // tối đa 60 giây
+        $payment_data = get_transient($transient_key);
+        if ($payment_data) {
+            delete_transient($transient_key);
+            $payload = wp_json_encode(['status' => 'success', 'data' => $payment_data]);
+            echo "event: payment\n";
+            echo "data: {$payload}\n\n";
+            flush();
+            return;
+        }
+        // keep-alive mỗi 5s
+        echo ": keepalive\n\n";
+        flush();
+        sleep(5);
+    }
+    // hết thời gian, kết thúc stream
+    echo ": timeout\n\n";
+    flush();
+}
 
 
 function attc_get_price_per_minute() {
@@ -352,6 +431,12 @@ function attc_upgrade_shortcode() {
     $display_name = wp_get_current_user()->display_name;
     $logout_url = wp_logout_url(get_permalink());
     $price_per_min = (int) attc_get_price_per_minute();
+    // Đọc cấu hình cổng thanh toán
+    $bank_name_opt = get_option('attc_bank_name', 'ACB');
+    $bank_acc_name_opt = get_option('attc_bank_account_name', 'DINH CONG TOAN');
+    $bank_acc_number_opt = get_option('attc_bank_account_number', '240306539');
+    $momo_phone_opt = get_option('attc_momo_phone', '0772729789');
+    $momo_name_opt = get_option('attc_momo_name', 'DINH CONG TOAN');
     $plans = [
         [ 'id' => 'topup-20k',  'title' => 'Nạp 20.000đ',  'amount' => 20000 ],
         [ 'id' => 'topup-50k',  'title' => 'Nạp 50.000đ',  'amount' => 50000 ],
@@ -376,7 +461,7 @@ function attc_upgrade_shortcode() {
     .attc-card-price strong{font-size:24px;}
     .attc-plan-select{display:inline-block;background:#2271b1;color:#fff !important;padding:10px 12px;border-radius:6px;text-decoration:none;font-weight:600;margin-top:10px;}
     .attc-userbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: #f0f4f8; border: 1px solid #e3e8ee; padding: 12px 16px; border-radius: 8px; margin-bottom: 1.5rem; }
-    .attc-userbar .attc-username { margin: 0; font-weight: 600; color: #2c3e50; }
+    .attc-userbar .attc-username { margin: 0; font-weight: 600; color: #2c3e50; font-size:20px;}
     .attc-userbar .attc-logout-btn { background: #e74c3c; color: #fff !important; text-decoration: none; padding: 8px 12px; border-radius: 6px; font-weight: 600; transition: background-color .2s; }
     .attc-userbar .attc-logout-btn:hover { background: #ff6b61; }
     .attc-userbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: #f0f4f8; border: 1px solid #e3e8ee; padding: 12px 16px; border-radius: 8px; margin-bottom: 1.5rem; }
@@ -422,15 +507,21 @@ function attc_upgrade_shortcode() {
                 <div class="attc-payment-column">
                     <h4>Ví MoMo</h4>
                     <div class="attc-qr-code" id="attc-momo-qr"></div>
+                    <div class="attc-bank-info">
+                        <p><strong>Số điện thoại:</strong> <span id="momo-phone"><?php echo esc_html($momo_phone_opt); ?></span></p>
+                        <p><strong>Tên MoMo:</strong> <span id="momo-name"><?php echo esc_html($momo_name_opt); ?></span></p>
+                        <p><strong>Số tiền:</strong> <strong class="price-payment" id="momo-amount"></strong></p>
+                        <p><strong>Nội dung:</strong> <strong class="price-payment" id="momo-memo"></strong></p>
+                    </div>
                     <p class="attc-qr-fallback">Mở MoMo, chọn "Quét Mã" và quét mã QR ở trên.</p>
                 </div>
                 <div class="attc-payment-column">
                     <h4>Chuyển khoản Ngân hàng (ACB)</h4>
                     <div class="attc-qr-code" id="attc-bank-qr"></div>
                     <div class="attc-bank-info">
-                        <p><strong>Ngân hàng:</strong> <span id="bank-name">ACB</span></p>
-                        <p><strong>Chủ tài khoản:</strong> <span id="account-name">DINH CONG TOAN</span></p>
-                        <p><strong>Số tài khoản:</strong> <span id="account-number">240306539</span></p>
+                        <p><strong>Ngân hàng:</strong> <span id="bank-name"><?php echo esc_html($bank_name_opt); ?></span></p>
+                        <p><strong>Chủ tài khoản:</strong> <span id="account-name"><?php echo esc_html($bank_acc_name_opt); ?></span></p>
+                        <p><strong>Số tài khoản:</strong> <span id="account-number"><?php echo esc_html($bank_acc_number_opt); ?></span></p>
                         <p><strong>Số tiền:</strong> <strong class="price-payment" id="bank-amount"></strong></p>
                         <p><strong>Nội dung:</strong> <strong class="price-payment" id="bank-memo"></strong></p>
                     </div>
@@ -463,6 +554,7 @@ function attc_enqueue_payment_checker_script() {
             wp_enqueue_script('attc-payment-checker', $script_url, [], $version, true);
             wp_localize_script('attc-payment-checker', 'attcPaymentData', [
                 'rest_url'      => esc_url_raw(rest_url('attc/v1/payment-status')),
+                'stream_url'    => esc_url_raw(rest_url('attc/v1/payment-stream')),
                 'price_per_min' => (string) attc_get_price_per_minute(),
                 'user_id'       => get_current_user_id(),
             ]);
@@ -762,7 +854,7 @@ function attc_handle_form_submission() {
                 $last_cost_message = 'Chuyển đổi miễn phí thành công!';
 
             } else {
-                // === LOGIC LUỒNG TRẢ PHÍ ===
+                // === LUỒNG TRẢ PHÍ (CHỈ TRỪ TIỀN KHI THÀNH CÔNG) ===
                 $minutes_ceil = ceil($duration / 60);
                 $cost = $minutes_ceil * $price_per_minute;
 
@@ -771,89 +863,304 @@ function attc_handle_form_submission() {
                     delete_transient($lock_key);
                     attc_redirect_back();
                 }
-
-                $charge_meta = ['reason' => 'audio_conversion', 'duration' => $duration, 'transcript' => ''];
-                $charge_result = attc_charge_wallet($user_id, $cost, $charge_meta);
-                 if (is_wp_error($charge_result)) {
-                    set_transient('attc_form_error', $charge_result->get_error_message(), 30);
-                    delete_transient($lock_key);
-                    attc_redirect_back();
-                }
-                $last_cost_message = 'Chi phí cho file vừa rồi: ' . number_format($cost) . 'đ cho ' . $minutes_ceil . ' phút.';
+                $last_cost_message = 'Chi phí dự kiến: ' . number_format($cost) . 'đ cho ' . $minutes_ceil . ' phút.';
             }
 
-            // === XỬ LÝ CHUNG: GỌI API VÀ TRẢ KẾT QUẢ ===
-            $api_key = get_option('attc_openai_api_key');
-            if (empty($api_key)) {
-                set_transient('attc_form_error', 'Lỗi: Quản trị viên chưa cấu hình OpenAI API Key.', 30);
-                if (!$is_free_tier_eligible && $cost > 0) {
-                    attc_credit_wallet($user_id, $cost, ['reason' => 'refund_api_key_missing']);
-                }
+            // === ENQUEUE JOB XỬ LÝ NỀN ===
+            $upload_dir = wp_upload_dir();
+            $job_dir = trailingslashit($upload_dir['basedir']) . 'attc_jobs/';
+            if (!file_exists($job_dir)) { wp_mkdir_p($job_dir); }
+
+            $job_id = uniqid('attc_job_', true);
+            $dest_path = $job_dir . $job_id . '-' . sanitize_file_name($file['name']);
+            if (!@move_uploaded_file($file['tmp_name'], $dest_path)) {
+                set_transient('attc_form_error', 'Không thể lưu file tạm để xử lý nền.', 30);
                 delete_transient($lock_key);
                 attc_redirect_back();
             }
 
-            $api_url = 'https://api.openai.com/v1/audio/transcriptions';
-            $headers = ['Authorization: Bearer ' . $api_key];
-            $post_fields = [
-                'model' => 'whisper-1',
-                'file' => curl_file_create($file['tmp_name'], mime_content_type($file['tmp_name']), basename($file['name']))
+            $job = [
+                'id' => $job_id,
+                'user_id' => $user_id,
+                'file_path' => $dest_path,
+                'file_name' => basename($dest_path),
+                'duration' => $duration,
+                'is_free' => (bool) $is_free_tier_eligible,
+                'cost' => (int) $cost,
+                'status' => 'queued',
+                'created_at' => time(),
             ];
+            update_option('attc_job_' . $job_id, $job, false);
 
-            $ch = curl_init();
-            curl_setopt($ch, CURLOPT_URL, $api_url);
-            curl_setopt($ch, CURLOPT_POST, 1);
-            curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $post_fields);
-            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-            curl_setopt($ch, CURLOPT_TIMEOUT, 300);
-
-            $response_body_str = curl_exec($ch);
-            $response_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-            $curl_error = curl_error($ch);
-            curl_close($ch);
-
-            if ($curl_error) {
-                set_transient('attc_form_error', 'Lỗi cURL: ' . $curl_error, 30);
-                if (!$is_free_tier_eligible && $cost > 0) { attc_credit_wallet($user_id, $cost, ['reason' => 'refund_curl_error']); }
-                delete_transient($lock_key);
-                attc_redirect_back();
+            if (!wp_next_scheduled('attc_run_job', [$job_id])) {
+                wp_schedule_single_event(time() + 1, 'attc_run_job', [$job_id]);
             }
 
-            $response_body = json_decode($response_body_str, true);
+            // Lưu job_id gần nhất cho user để client có thể polling
+            set_transient('attc_last_job_' . $user_id, $job_id, HOUR_IN_SECONDS);
 
-            if ($response_code !== 200) {
-                $error_message = isset($response_body['error']['message']) ? $response_body['error']['message'] : 'Lỗi không xác định từ OpenAI.';
-                set_transient('attc_form_error', 'Lỗi từ OpenAI (Code: ' . $response_code . '): ' . $error_message, 30);
-                if (!$is_free_tier_eligible && $cost > 0) { attc_credit_wallet($user_id, $cost, ['reason' => 'refund_openai_error']); }
-                delete_transient($lock_key);
-                attc_redirect_back();
-            }
+            // Thông báo hàng đợi cho UI (tách khỏi transcript)
+            set_transient('attc_queue_notice', 'Yêu cầu đã được đưa vào hàng đợi xử lý. Bạn có thể đóng trang hoặc chờ tại trang này, kết quả sẽ hiển thị khi hoàn tất.', 60);
+            if (!empty($last_cost_message)) { set_transient('attc_last_cost', $last_cost_message, 30); }
 
-            $transcript = $response_body['text'] ?? '';
-
-            // Cập nhật lịch sử giao dịch với nội dung transcript TRƯỚC khi chuyển hướng
-            if (!$is_free_tier_eligible) {
-                $history = get_user_meta($user_id, 'attc_wallet_history', true);
-                if (!empty($history)) {
-                    $last_key = array_key_last($history);
-                    if (isset($history[$last_key]['meta']['reason']) && $history[$last_key]['meta']['reason'] === 'audio_conversion') {
-                        $history[$last_key]['meta']['transcript'] = $transcript;
-                        update_user_meta($user_id, 'attc_wallet_history', $history);
-                    }
-                }
-            }
-            
-            set_transient('attc_form_success', $transcript, 30);
-            set_transient('attc_last_cost', $last_cost_message, 30);
-
-            // Chuyển hướng để tải lại trang và cập nhật giao diện
+            // Kết thúc request sớm để người dùng không phải chờ
             delete_transient($lock_key);
             attc_redirect_back();
         }
     }
 }
 add_action('init', 'attc_handle_form_submission');
+
+// ===== REST: Job status =====
+add_action('rest_api_init', function () {
+    register_rest_route('attc/v1', '/jobs/latest', [
+        'methods' => 'GET',
+        // Cho phép public, tự xử lý đăng nhập trong callback để tránh 401
+        'permission_callback' => '__return_true',
+        'callback' => function(\WP_REST_Request $req) {
+            $user_id = get_current_user_id();
+            if ($user_id <= 0) {
+                // Chưa đăng nhập: không trả 401 để tránh lỗi console, chỉ trả none
+                return new WP_REST_Response(['status' => 'none'], 200);
+            }
+            $job_id = get_transient('attc_last_job_' . $user_id);
+            if (empty($job_id)) {
+                return new WP_REST_Response(['status' => 'none'], 200);
+            }
+            $job = get_option('attc_job_' . $job_id, []);
+            if (empty($job) || (int)($job['user_id'] ?? 0) !== $user_id) {
+                return new WP_REST_Response(['status' => 'none'], 200);
+            }
+            $payload = [
+                'status' => (string) ($job['status'] ?? 'queued'),
+                // fallback dùng $job_id từ transient nếu trong job thiếu id
+                'job_id' => (string) (!empty($job['id']) ? $job['id'] : $job_id),
+            ];
+            if (!empty($job['transcript'])) {
+                $payload['transcript'] = (string) $job['transcript'];
+            }
+            if (!empty($job['error'])) {
+                $payload['error'] = (string) $job['error'];
+            }
+            if (!empty($job['file_name'])) {
+                $payload['file_name'] = (string) $job['file_name'];
+            }
+            if (!empty($job['finished_at'])) {
+                $payload['finished_at'] = (int) $job['finished_at'];
+            }
+            if (!empty($job['history_timestamp'])) {
+                $ts = (int) $job['history_timestamp'];
+                $nonce = wp_create_nonce('attc_download_' . $ts);
+                $payload['download_link'] = add_query_arg([
+                    'action' => 'attc_download_transcript',
+                    'timestamp' => $ts,
+                    'nonce' => $nonce,
+                ], home_url());
+            }
+            return new WP_REST_Response($payload, 200);
+        }
+    ]);
+
+    register_rest_route('attc/v1', '/jobs/(?P<id>[^/]+)/status', [
+        'methods' => 'GET',
+        // Cho phép public, tự xử lý đăng nhập trong callback để tránh 401
+        'permission_callback' => '__return_true',
+        'callback' => function(\WP_REST_Request $req) {
+            $user_id = get_current_user_id();
+            if ($user_id <= 0) {
+                return new WP_REST_Response(['status' => 'none'], 200);
+            }
+            $job_id = sanitize_text_field($req->get_param('id'));
+            $job = get_option('attc_job_' . $job_id, []);
+            if (empty($job) || (int)($job['user_id'] ?? 0) !== $user_id) {
+                // Không trả 401 để tránh lỗi console
+                return new WP_REST_Response(['status' => 'none'], 200);
+            }
+            $payload = [
+                'status' => (string) ($job['status'] ?? 'queued'),
+                // luôn trả lại id từ tham số route nếu job thiếu id
+                'job_id' => (string) (!empty($job['id']) ? $job['id'] : $job_id),
+            ];
+            if (!empty($job['transcript'])) {
+                $payload['transcript'] = (string) $job['transcript'];
+            }
+            if (!empty($job['error'])) {
+                $payload['error'] = (string) $job['error'];
+            }
+            if (!empty($job['file_name'])) {
+                $payload['file_name'] = (string) $job['file_name'];
+            }
+            if (!empty($job['finished_at'])) {
+                $payload['finished_at'] = (int) $job['finished_at'];
+            }
+            if (!empty($job['history_timestamp'])) {
+                $ts = (int) $job['history_timestamp'];
+                $nonce = wp_create_nonce('attc_download_' . $ts);
+                $payload['download_link'] = add_query_arg([
+                    'action' => 'attc_download_transcript',
+                    'timestamp' => $ts,
+                    'nonce' => $nonce,
+                ], home_url());
+            }
+            return new WP_REST_Response($payload, 200);
+        }
+    ]);
+
+    // Retry a job by id (only owner)
+    register_rest_route('attc/v1', '/jobs/(?P<id>[^/]+)/retry', [
+        'methods' => 'POST',
+        'permission_callback' => function() { return is_user_logged_in(); },
+        'callback' => function(\WP_REST_Request $req) {
+            $user_id = get_current_user_id();
+            $job_id = sanitize_text_field($req->get_param('id'));
+            $job_key = 'attc_job_' . $job_id;
+            $job = get_option($job_key, []);
+            if (empty($job) || (int)($job['user_id'] ?? 0) !== $user_id) {
+                return new WP_REST_Response(['status' => 'not_found'], 404);
+            }
+            // Only allow retry if failed or queued but not running/done
+            $status = (string)($job['status'] ?? 'queued');
+            if ($status === 'done') {
+                return new WP_REST_Response(['status' => 'already_done'], 200);
+            }
+            // Validate file still exists
+            $file_path = (string) ($job['file_path'] ?? '');
+            if (!file_exists($file_path)) {
+                return new WP_REST_Response(['status' => 'cannot_retry', 'error' => 'Không tìm thấy file gốc để xử lý lại. Vui lòng tải lại file.'], 400);
+            }
+            // Reset status and reschedule
+            $job['status'] = 'queued';
+            unset($job['error']);
+            unset($job['transcript']);
+            update_option($job_key, $job, false);
+
+            if (!wp_next_scheduled('attc_run_job', [$job_id])) {
+                wp_schedule_single_event(time() + 1, 'attc_run_job', [$job_id]);
+            }
+
+            // update latest job id transient
+            set_transient('attc_last_job_' . $user_id, $job_id, HOUR_IN_SECONDS);
+
+            return new WP_REST_Response(['status' => 'requeued', 'job_id' => $job_id], 200);
+        }
+    ]);
+});
+
+// ===== Job Processor (WP-Cron) =====
+add_action('attc_run_job', 'attc_process_job', 10, 1);
+function attc_process_job($job_id) {
+    $job = get_option('attc_job_' . $job_id, []);
+    if (empty($job) || !is_array($job)) { return; }
+
+    ignore_user_abort(true);
+    @set_time_limit(0);
+
+    $user_id = (int) ($job['user_id'] ?? 0);
+    $file_path = (string) ($job['file_path'] ?? '');
+    $is_free = !empty($job['is_free']);
+    $cost = (int) ($job['cost'] ?? 0);
+
+    if (!file_exists($file_path)) {
+        $job['status'] = 'failed';
+        $job['error'] = 'File không tồn tại.';
+        update_option('attc_job_' . $job_id, $job, false);
+        return;
+    }
+
+    $api_key = get_option('attc_openai_api_key');
+    if (empty($api_key)) {
+        $job['status'] = 'failed';
+        $job['error'] = 'Thiếu OpenAI API Key.';
+        update_option('attc_job_' . $job_id, $job, false);
+        return;
+    }
+
+    $api_url = 'https://api.openai.com/v1/audio/transcriptions';
+    $headers = ['Authorization: Bearer ' . $api_key];
+    $post_fields = [
+        'model' => 'whisper-1',
+        'language' => 'vi',
+        'temperature' => 0,
+        // Prompt tối ưu hoá để giảm lỗi chính tả/nhầm dấu khi nói nhanh
+        'prompt' => 'Phiên âm chính xác tiếng Việt từ file ghi âm, ưu tiên viết đúng chính tả và đầy đủ dấu tiếng Việt, không thêm/bớt nội dung. Yêu cầu: (1) Viết hoa đầu câu và tên riêng, (2) Giữ nguyên dấu câu, (3) Xuống dòng tự nhiên theo ngữ nghĩa.',
+        'file' => curl_file_create($file_path, mime_content_type($file_path), basename($file_path))
+    ];
+
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $api_url);
+    curl_setopt($ch, CURLOPT_POST, 1);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $post_fields);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 600);
+
+    $response_body_str = curl_exec($ch);
+    $response_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_error = curl_error($ch);
+    curl_close($ch);
+
+    if ($curl_error) {
+        $job['status'] = 'failed';
+        $job['error'] = 'cURL: ' . $curl_error;
+        update_option('attc_job_' . $job_id, $job, false);
+        return;
+    }
+
+    $response_body = json_decode($response_body_str, true);
+    if ($response_code !== 200) {
+        $job['status'] = 'failed';
+        $job['error'] = isset($response_body['error']['message']) ? $response_body['error']['message'] : 'OpenAI error.';
+        update_option('attc_job_' . $job_id, $job, false);
+        return;
+    }
+
+    $transcript = $response_body['text'] ?? '';
+
+    // Hậu xử lý: chuẩn hoá chính tả tiếng Việt bằng OpenAI Chat (tuỳ chọn, an toàn lỗi)
+    if (!empty($transcript)) {
+        $corrected = attc_vi_correct_text($transcript, $api_key);
+        if (is_string($corrected) && $corrected !== '') {
+            $transcript = $corrected;
+        }
+    }
+
+    // Chỉ trừ tiền khi API trả về thành công
+    if (!$is_free && $cost > 0) {
+        $charge_meta = ['reason' => 'audio_conversion', 'duration' => (int)($job['duration'] ?? 0), 'transcript' => $transcript];
+        $charge_result = attc_charge_wallet($user_id, $cost, $charge_meta);
+        if (is_wp_error($charge_result)) {
+            // Không thể trừ tiền: vẫn lưu transcript vào lịch sử với amount 0 để không mất dữ liệu
+            attc_add_wallet_history($user_id, [
+                'type' => 'conversion',
+                'amount' => 0,
+                'meta' => $charge_meta,
+            ]);
+        }
+    } else {
+        // Miễn phí: vẫn lưu transcript vào lịch sử
+        attc_add_wallet_history($user_id, [
+            'type' => 'conversion_free',
+            'amount' => 0,
+            'meta' => ['reason' => 'free_tier', 'duration' => (int)($job['duration'] ?? 0), 'transcript' => $transcript],
+        ]);
+    }
+
+    $job['status'] = 'done';
+    $job['transcript'] = $transcript;
+    $job['finished_at'] = time();
+    // Lưu timestamp lịch sử gần nhất để sinh link tải .docx
+    $history = get_user_meta($user_id, 'attc_wallet_history', true);
+    if (!empty($history)) {
+        $last_item = end($history);
+        if (!empty($last_item['timestamp'])) {
+            $job['history_timestamp'] = (int) $last_item['timestamp'];
+        }
+    }
+    update_option('attc_job_' . $job_id, $job, false);
+
+    // Dọn file tạm
+    @unlink($file_path);
+}
 
 function attc_form_shortcode() {
     if (!is_user_logged_in()) {
@@ -870,6 +1177,9 @@ function attc_form_shortcode() {
 
     $success_message = get_transient('attc_form_success');
     if ($success_message) delete_transient('attc_form_success');
+    // Thông báo hàng đợi (nếu vừa enqueue job)
+    $queue_notice = get_transient('attc_queue_notice');
+    if ($queue_notice) delete_transient('attc_queue_notice');
 
     $last_cost = get_transient('attc_last_cost');
     if ($last_cost) delete_transient('attc_last_cost');
@@ -878,7 +1188,7 @@ function attc_form_shortcode() {
     ?>
     <style>
         .attc-converter-wrap { max-width: 700px; margin: 2rem auto; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif; }
-        .attc-wallet-box { background: #f0f4f8; border-radius: 8px; padding: 1.5rem; display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem; }
+        .attc-wallet-box { background: #d6e4fd; border-radius: 8px; padding: 1.5rem; display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem; }
         .attc-wallet-balance p { margin: 0; font-size: 1.1rem; } .attc-wallet-balance p strong { font-size: 1.5rem; color: #2c3e50; }
         .attc-wallet-sub { color: #5a6e82; font-size: 0.9rem; }
         .attc-wallet-actions a { text-decoration: none; padding: 0.6rem 1rem; border-radius: 5px; font-weight: 500; transition: background-color 0.2s; }
@@ -932,6 +1242,8 @@ function attc_form_shortcode() {
         .attc-progress-outer { width:100%; height:10px; background:#e5e7eb; border-radius:999px; overflow:hidden; }
         .attc-progress-inner { height:100%; width:0%; background:#1d4ed8; transition: width .3s ease; }
         .attc-progress-text { font-size:12px; color:#334155; margin-top:6px; }
+        .attc-user-name { font-size: 20px; }
+        .attc-result-text { max-height: 300px; overflow-y: auto; background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 6px; line-height: 1.6; white-space: pre-wrap; }
     </style>
 
     <?php
@@ -963,7 +1275,7 @@ function attc_form_shortcode() {
         </div>
 
         <p class="attc-wallet-sub" style="margin-top:-8px; margin-bottom: 16px; color:#5a6e82;">
-            Đơn giá hiện tại: <strong><?php echo number_format((int)$price_per_minute, 0, ',', '.'); ?> đ/phút</strong>
+            Đơn giá hiện tại: <strong><?php echo number_format((int)$price_per_minute, 0, ',', '.'); ?>đ/phút</strong>
         </p>
 
         <?php 
@@ -975,6 +1287,7 @@ function attc_form_shortcode() {
         ?>
         <?php if ($error_message): ?><div class="attc-alert attc-error"><?php echo esc_html($error_message); ?></div><?php endif; ?>
         <?php if ($last_cost): ?><div class="attc-alert attc-info"><?php echo esc_html($last_cost); ?></div><?php endif; ?>
+        <?php if ($queue_notice): ?><div class="attc-alert attc-info" id="attc-queue-notice"><?php echo esc_html($queue_notice); ?></div><?php endif; ?>
 
         <form action="" method="post" enctype="multipart/form-data" id="attc-upload-form">
             <?php wp_nonce_field('attc_form_action', 'attc_nonce'); ?>
@@ -992,32 +1305,42 @@ function attc_form_shortcode() {
             </div>
         </form>
 
-        <?php if ($success_message): 
+        <?php 
+            // Luôn render khối kết quả để JS có thể chèn transcript khi xong
             $download_link = '';
-            $history = get_user_meta($user_id, 'attc_wallet_history', true);
-            if (!empty($history)) {
-                $last_item = end($history);
-                if (($last_item['meta']['reason'] ?? '') === 'audio_conversion') {
-                     $download_nonce = wp_create_nonce('attc_download_' . $last_item['timestamp']);
-                     $download_link = add_query_arg([
-                        'action' => 'attc_download_transcript',
-                        'timestamp' => $last_item['timestamp'],
-                        'nonce' => $download_nonce,
-                    ], home_url());
+            if ($success_message) {
+                $history = get_user_meta($user_id, 'attc_wallet_history', true);
+                if (!empty($history)) {
+                    $last_item = end($history);
+                    if (($last_item['meta']['reason'] ?? '') === 'audio_conversion') {
+                        $download_nonce = wp_create_nonce('attc_download_' . $last_item['timestamp']);
+                        $download_link = add_query_arg([
+                            'action' => 'attc_download_transcript',
+                            'timestamp' => $last_item['timestamp'],
+                            'nonce' => $download_nonce,
+                        ], home_url());
+                    }
                 }
             }
         ?>
-        <div class="attc-result">
+        <?php $result_hidden = empty($success_message) && empty($queue_notice); ?>
+        <div class="attc-result<?php echo $result_hidden ? ' is-hidden' : ''; ?>" id="attc-result">
             <h3>Kết quả chuyển đổi:</h3>
-            <div class="attc-result-text"><?php echo nl2br(esc_html($success_message)); ?></div>
+            <div class="attc-result-text"><?php echo $success_message ? nl2br(esc_html($success_message)) : ''; ?></div>
             <?php if ($download_link): ?>
             <div class="attc-result-actions">
                 <a href="<?php echo esc_url($download_link); ?>" class="download-btn">Tải kết quả (.docx)</a>
             </div>
             <?php endif; ?>
         </div>
-        <?php endif; ?>
+        
     </div>
+
+    <script>
+    // Cung cấp nonce REST cho client, không phụ thuộc theme
+    window.wpApiSettings = window.wpApiSettings || {};
+    window.wpApiSettings.nonce = '<?php echo esc_js( wp_create_nonce('wp_rest') ); ?>';
+    </script>
 
     <script>
     document.addEventListener('DOMContentLoaded', function() {
@@ -1029,9 +1352,63 @@ function attc_form_shortcode() {
         const progressWrap = document.getElementById('attc-progress');
         const progressBar = document.getElementById('attc-progress-bar');
         const progressText = document.getElementById('attc-progress-text');
+        // Khai báo trước để dùng được trong submit handler
+        const resultContainer = document.querySelector('.attc-result');
+        const resultTextBox = document.querySelector('.attc-result-text');
+        const resultToolbarId = 'attc-result-tools';
         let progressTimer = null;
 
+        // Tự động cuộn tới khối kết quả nếu có, giúp người dùng thấy ngay kết quả
+        const resultBox = document.querySelector('.attc-result');
+        if (resultBox) {
+            resultBox.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }
+
         if (!dropZone || !uploadForm) return;
+
+        // Chặn hành vi mặc định của trình duyệt trên toàn trang để tránh mở file khi kéo ra ngoài vùng drop
+        ['dragenter','dragover','dragleave','drop'].forEach(function(evt){
+            window.addEventListener(evt, function(e){ e.preventDefault(); e.stopPropagation(); }, false);
+            document.addEventListener(evt, function(e){ e.preventDefault(); e.stopPropagation(); }, false);
+        });
+
+        // Sửa drag & drop file ghi âm (trên vùng drop)
+        ;['dragenter', 'dragover', 'dragleave', 'drop'].forEach(function(eventName){
+            dropZone.addEventListener(eventName, function(e){
+                e.preventDefault();
+                e.stopPropagation();
+            }, false);
+        });
+        ;['dragenter', 'dragover'].forEach(function(eventName){
+            dropZone.addEventListener(eventName, function(){ dropZone.classList.add('is-dragover'); }, false);
+        });
+        ;['dragleave', 'drop'].forEach(function(eventName){
+            dropZone.addEventListener(eventName, function(){ dropZone.classList.remove('is-dragover'); }, false);
+        });
+        dropZone.addEventListener('drop', function(e){
+            var dt = e.dataTransfer;
+            var files = dt.files;
+            if (files.length > 0) {
+                fileInput.files = files;
+                var event = new Event('change');
+                fileInput.dispatchEvent(event);
+            }
+        }, false);
+
+        // Hiện tên file khi chọn + bật/tắt nút submit
+        function updateFileUI(){
+            if (fileInput.files && fileInput.files.length > 0) {
+                var file = fileInput.files[0];
+                fileInfo.textContent = 'File đã chọn: ' + file.name + ' (' + (file.size / 1024 / 1024).toFixed(2) + ' MB)';
+                submitButton.disabled = false;
+            } else {
+                fileInfo.textContent = '';
+                submitButton.disabled = true;
+            }
+        }
+        fileInput.addEventListener('change', updateFileUI);
+        // Khởi tạo trạng thái nút submit theo file hiện có (nếu có)
+        updateFileUI();
 
         uploadForm.addEventListener('submit', function() {
             if (submitButton.disabled) return;
@@ -1041,7 +1418,167 @@ function attc_form_shortcode() {
                 progressWrap.classList.remove('is-hidden');
                 startFakeProgress();
             }
+            // Hiện khối kết quả ngay khi user bắt đầu upload
+            if (resultContainer) { resultContainer.classList.remove('is-hidden'); }
         });
+
+        // Polling trạng thái job mới nhất để auto hiển thị transcript
+        const jobLatestUrl = '<?php echo esc_url_raw( rest_url('attc/v1/jobs/latest') ); ?>';
+        // Fallback từ server: job_id gần nhất lưu transient
+        const attcLastJobId = '<?php echo esc_js( (string) get_transient('attc_last_job_' . get_current_user_id()) ); ?>';
+
+        function applyTranscript(text){
+            if (!text) return;
+            if (resultTextBox) {
+                resultTextBox.textContent = text;
+                resultTextBox.scrollTop = resultTextBox.scrollHeight;
+            }
+            if (resultContainer) {
+                resultContainer.scrollIntoView({ behavior:'smooth', block:'start' });
+            }
+        }
+
+        let pollTimer = null;
+        function pollLatestJob(){
+            fetch(jobLatestUrl, { credentials: 'same-origin' })
+                .then(r => r.json())
+                .then(data => {
+                    if (!data || data.status === 'none') return;
+                    // Hiển thị job_id và toolbar
+                    if (resultContainer) {
+                        let tools = document.getElementById(resultToolbarId);
+                        if (!tools) {
+                            tools = document.createElement('div');
+                            tools.id = resultToolbarId;
+                            tools.style.margin = '10px 0';
+                            tools.style.display = 'flex';
+                            tools.style.gap = '10px';
+                            resultContainer.parentNode.insertBefore(tools, resultContainer);
+                        }
+                        tools.innerHTML = '';
+                        const mkBadge = (label, value) => {
+                            const span = document.createElement('span');
+                            span.textContent = label + ': ' + value;
+                            span.style.padding = '6px 10px';
+                            span.style.background = '#eef2f7';
+                            span.style.border = '1px solid #d8dee9';
+                            span.style.borderRadius = '6px';
+                            span.style.fontSize = '12px';
+                            return span;
+                        };
+                        const jobIdDisplay = (data.job_id || attcLastJobId || '').trim();
+                        if (jobIdDisplay) {
+                            tools.appendChild(mkBadge('Job ID', jobIdDisplay));
+                        }
+                        if (data.file_name) {
+                            tools.appendChild(mkBadge('File', data.file_name));
+                        }
+                        if (data.finished_at) {
+                            const dt = new Date(data.finished_at * 1000);
+                            tools.appendChild(mkBadge('Hoàn tất', dt.toLocaleString()))
+                        }
+                        if (data.status === 'failed') {
+                            const retryBtn = document.createElement('button');
+                            retryBtn.type = 'button';
+                            retryBtn.textContent = 'Thử lại';
+                            retryBtn.style.background = '#2271b1';
+                            retryBtn.style.color = '#fff';
+                            retryBtn.style.border = 'none';
+                            retryBtn.style.borderRadius = '6px';
+                            retryBtn.style.padding = '6px 12px';
+                            retryBtn.style.cursor = 'pointer';
+                            retryBtn.addEventListener('click', function(){
+                                if (!data.job_id) return;
+                                fetch('<?php echo esc_url_raw( rest_url('attc/v1/jobs/') ); ?>' + encodeURIComponent(data.job_id) + '/retry', {
+                                    method: 'POST',
+                                    credentials: 'same-origin',
+                                    headers: { 'X-WP-Nonce': (window.wpApiSettings && wpApiSettings.nonce) ? wpApiSettings.nonce : '' }
+                                })
+                                .then(r => r.json())
+                                .then(resp => {
+                                    // reset UI
+                                    const errBox = document.getElementById('attc-job-error');
+                                    if (errBox) errBox.remove();
+                                    if (progressWrap) progressWrap.classList.remove('is-hidden');
+                                    startFakeProgress();
+                                    // resume polling immediately
+                                    if (!pollTimer) {
+                                        pollTimer = setInterval(pollLatestJob, 5000);
+                                    }
+                                    pollLatestJob();
+                                })
+                                .catch(()=>{});
+                            });
+                            tools.appendChild(retryBtn);
+                        }
+                    }
+                    if (data.status === 'done') {
+                        // Đảm bảo khối kết quả hiển thị
+                        if (resultContainer) { resultContainer.classList.remove('is-hidden'); }
+                        
+                        // Gán transcript (kể cả khi rỗng) và cuộn vào tầm nhìn
+                        const text = (typeof data.transcript === 'string') ? data.transcript : '';
+                        if (text && text.trim().length > 0) {
+                            applyTranscript(text);
+                        } else if (resultTextBox) {
+                            resultTextBox.textContent = '(Không có nội dung hoặc API trả về rỗng)';
+                        }
+                        
+                        // Ẩn loading + ẩn thông báo hàng đợi
+                        if (progressWrap) progressWrap.classList.add('is-hidden');
+                        const qn = document.getElementById('attc-queue-notice');
+                        if (qn) { qn.classList.add('is-hidden'); }
+                        
+                        // Hiển thị nút tải .docx nếu API trả link
+                        if (data.download_link) {
+                            let actions = document.querySelector('.attc-result-actions');
+                            if (!actions) {
+                                actions = document.createElement('div');
+                                actions.className = 'attc-result-actions';
+                                if (resultContainer) {
+                                    resultContainer.appendChild(actions);
+                                }
+                            }
+                            actions.innerHTML = '';
+                            const a = document.createElement('a');
+                            a.href = data.download_link;
+                            a.textContent = 'Tải kết quả (.docx)';
+                            a.className = 'download-btn';
+                            actions.appendChild(a);
+                        }
+                        
+                        // Dừng polling
+                        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+                    } else if (data.status === 'failed') {
+                        if (progressWrap) progressWrap.classList.add('is-hidden');
+                        const qn = document.getElementById('attc-queue-notice');
+                        if (qn) { qn.classList.add('is-hidden'); }
+                        // Tạo/hiện thông báo lỗi UI
+                        const msg = data.error || 'Xử lý chuyển đổi thất bại. Vui lòng thử lại sau.';
+                        let errBox = document.getElementById('attc-job-error');
+                        if (!errBox) {
+                            errBox = document.createElement('div');
+                            errBox.id = 'attc-job-error';
+                            errBox.className = 'attc-alert attc-error';
+                            // chèn trước khu vực kết quả nếu có
+                            if (resultContainer && resultContainer.parentNode) {
+                                resultContainer.parentNode.insertBefore(errBox, resultContainer);
+                            } else {
+                                document.body.prepend(errBox);
+                            }
+                        }
+                        errBox.textContent = msg;
+                        errBox.scrollIntoView({ behavior:'smooth', block:'start' });
+                        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+                    }
+                })
+                .catch(()=>{});
+        }
+
+        // Bắt đầu polling mỗi 5s khi trang mở
+        pollTimer = setInterval(pollLatestJob, 5000);
+        // Gọi ngay lần đầu để nhanh thấy kết quả nếu đã xong
+        pollLatestJob();
 
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
             dropZone.addEventListener(eventName, preventDefaults, false);
@@ -1077,7 +1614,7 @@ function attc_form_shortcode() {
             if (files.length > 0) {
                 fileInput.files = files; // Gán file vào input để form có thể submit
                 const file = files[0];
-                fileInfo.textContent = `File đã chọn: ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`;
+                fileInfo.textContent = 'File đã chọn: ' + file.name + ' (' + (file.size / 1024 / 1024).toFixed(2) + ' MB)';
                 submitButton.disabled = false;
                 resetFakeProgress();
             }
@@ -1106,7 +1643,7 @@ function attc_form_shortcode() {
 
         function updateProgress(val) {
             if (progressBar) progressBar.style.width = val + '%';
-            if (progressText) progressText.textContent = `Đang xử lý (${val}%)`;
+            if (progressText) progressText.textContent = 'Đang xử lý (' + val + '%)';
         }
     });
     </script>
@@ -1659,6 +2196,56 @@ function attc_settings_init() {
         'attc-settings',
         'attc_pricing_section',
         ['name' => 'attc_free_threshold', 'type' => 'number', 'desc' => 'Nếu số dư ví <= giá trị này thì áp dụng lượt miễn phí (mặc định 500).']
+    );
+
+    // Payment Gateways Section
+    add_settings_section('attc_payment_section', 'Cài đặt Cổng Thanh Toán', null, 'attc-settings');
+    // Bank settings
+    register_setting('attc_settings', 'attc_bank_name');
+    register_setting('attc_settings', 'attc_bank_account_name');
+    register_setting('attc_settings', 'attc_bank_account_number');
+    add_settings_field(
+        'attc_bank_name',
+        'Ngân hàng (VietQR)',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_payment_section',
+        ['name' => 'attc_bank_name', 'type' => 'text', 'desc' => 'Ví dụ: ACB, VCB, TCB... (phù hợp với API VietQR).']
+    );
+    add_settings_field(
+        'attc_bank_account_name',
+        'Chủ tài khoản',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_payment_section',
+        ['name' => 'attc_bank_account_name', 'type' => 'text', 'desc' => 'Tên chủ tài khoản ngân hàng.']
+    );
+    add_settings_field(
+        'attc_bank_account_number',
+        'Số tài khoản',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_payment_section',
+        ['name' => 'attc_bank_account_number', 'type' => 'text', 'desc' => 'Số tài khoản ngân hàng.']
+    );
+    // MoMo settings
+    register_setting('attc_settings', 'attc_momo_phone');
+    register_setting('attc_settings', 'attc_momo_name');
+    add_settings_field(
+        'attc_momo_phone',
+        'Số điện thoại MoMo',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_payment_section',
+        ['name' => 'attc_momo_phone', 'type' => 'text', 'desc' => 'Số điện thoại tài khoản MoMo nhận tiền.']
+    );
+    add_settings_field(
+        'attc_momo_name',
+        'Tên MoMo',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_payment_section',
+        ['name' => 'attc_momo_name', 'type' => 'text', 'desc' => 'Tên hiển thị của tài khoản MoMo.']
     );
 }
 add_action('admin_init', 'attc_settings_init');

@@ -21,7 +21,7 @@ function attc_history_shortcode() {
     <style>
         .attc-history-wrap { max-width: 800px; margin: 2rem auto; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         .attc-userbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; background: #f0f4f8; border: 1px solid #e3e8ee; padding: 12px 16px; border-radius: 8px; }
-        .attc-userbar .attc-username { margin: 0; font-weight: 600; color: #2c3e50; }
+        .attc-userbar .attc-username { margin: 0; font-weight: 600; color: #2c3e50;font-size:20px; }
         .attc-userbar .attc-logout-btn { background: #e74c3c; color: #fff !important; text-decoration: none; padding:0.6rem 1rem; border-radius: 6px; font-weight: 600; transition: background-color .2s; }
         .attc-userbar .attc-logout-btn:hover { background: #ff6b61; }
         .attc-history-table { width: 100%; border-collapse: collapse; margin-top: 1.5rem; }
