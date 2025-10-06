@@ -499,6 +499,7 @@ function attc_upgrade_shortcode() {
         </div>
 
         <div id="attc-payment-details" class="is-hidden">
+        <a href="/chuyen-doi-giong-noi"><button id="attc-back-to-plan">← Quay lại chuyển đổi giọng nói</button></a>
             <button id="attc-back-to-plans">&larr; Quay lại chọn gói</button>
             <h3>Chi tiết thanh toán</h3>
 
@@ -1250,6 +1251,7 @@ function attc_form_shortcode() {
             transition: background-color 0.2s;
         }
         .attc-result-actions .download-btn:hover { background-color: #3498db; }
+        #attc-result-tools {display: none;}
         /* Progress UI */
         .is-hidden { display: none; }
         .attc-progress { margin-top: 14px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px; }
@@ -1261,7 +1263,7 @@ function attc_form_shortcode() {
         .attc-progress-text { font-size:12px; color:#334155; margin-top:6px; }
         .attc-user-name { font-size: 20px; }
         .attc-result-text { max-height: 300px; overflow-y: auto; background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 6px; line-height: 1.6; white-space: pre-wrap; }
-    </style>
+   </style>
 
     <?php
     $user_id = get_current_user_id();
@@ -1773,7 +1775,7 @@ function attc_auth_assets() {
         $auth_css = "
         <style>
             .attc-auth-form-wrap {
-                max-width: 420px;
+                max-width: 700px;
                 margin: 3rem auto;
                 padding: 2.5rem;
                 background: #ffffff;
@@ -1840,7 +1842,7 @@ function attc_auth_assets() {
             .attc-auth-info { color: #2980b9; background-color: #eaf5fb; }
             .attc-auth-switch {
                 text-align: center;
-                margin-top: 2rem;
+                margin-top: 1rem;
                 display: flex;
                 flex-direction: column;
                 gap: 0.8rem;
@@ -1887,11 +1889,18 @@ function attc_login_form_shortcode() {
 
     $login_errors = get_transient('attc_login_errors');
     if ($login_errors) delete_transient('attc_login_errors');
+    $activation_success = get_transient('attc_activation_success');
+    if ($activation_success) delete_transient('attc_activation_success');
+    $activation_success = get_transient('attc_activation_success');
+    if ($activation_success) delete_transient('attc_activation_success');
 
     ob_start();
     ?>
     <div class="attc-auth-form-wrap">
         <h2>Đăng nhập</h2>
+        <?php if ($activation_success): ?>
+            <div class="attc-auth-info"><p><?php echo esc_html($activation_success); ?></p></div>
+        <?php endif; ?>
         <?php if ($login_errors): ?>
             <div class="attc-auth-errors"><p><?php echo esc_html($login_errors); ?></p></div>
         <?php endif; ?>
@@ -1949,6 +1958,15 @@ function attc_handle_custom_login_form() {
             wp_redirect(site_url('/dang-nhap'));
             exit;
         } else {
+            // Kiểm tra xem email đã được xác thực chưa
+            $is_verified = (int) get_user_meta($user->ID, 'attc_email_verified', true);
+            if ($is_verified !== 1) {
+                wp_logout(); // Đăng xuất người dùng ngay lập tức
+                set_transient('attc_login_errors', 'Tài khoản của bạn chưa được kích hoạt. Vui lòng kiểm tra Email để lấy link kích hoạt.', 60);
+                wp_redirect(site_url('/dang-nhap'));
+                exit;
+            }
+
             wp_redirect(site_url('/chuyen-doi-giong-noi/'));
             exit;
         }
@@ -1962,12 +1980,17 @@ function attc_register_form_shortcode() {
     if (is_user_logged_in()) return '';
 
     $reg_errors = get_transient('attc_registration_errors');
+    $reg_info = get_transient('attc_registration_info');
+    if ($reg_info) delete_transient('attc_registration_info');
 
     ob_start();
     ?>
     <div class="attc-auth-form-wrap">
         <h2>Đăng ký tài khoản</h2>
-        <?php 
+        <?php
+        if ($reg_info) {
+            echo '<div class="attc-auth-info"><p>' . esc_html($reg_info) . '</p></div>';
+        }
         if ($reg_errors && is_array($reg_errors)) {
             echo '<div class="attc-auth-errors">';
             foreach ($reg_errors as $error) {
@@ -1979,7 +2002,7 @@ function attc_register_form_shortcode() {
         ?>
         <form action="" method="post">
             <div class="form-row"><label for="attc_reg_user">Tên người dùng</label><input type="text" name="reg_user" id="attc_reg_user" required></div>
-            <div class="form-row"><label for="attc_reg_email">Email</label><input type="email" name="reg_email" id="attc_reg_email" required></div>
+            <div class="form-row"><label for="attc_reg_email">Email</label><input type="email" name="reg_email" id="attc_reg_email" required><small style=\"display:block;color:#555;margin-top:6px;\">Vui lòng nhập đúng Email của bạn. Hệ thống sẽ gửi liên kết kích hoạt để xác thực tài khoản.</small></div>
             <div class="form-row"><label for="attc_reg_pass">Mật khẩu</label><input type="password" name="reg_pass" id="attc_reg_pass" required></div>
             <div class="form-row"><label for="attc_reg_pass2">Xác nhận mật khẩu</label><input type="password" name="reg_pass2" id="attc_reg_pass2" required></div>
             <?php $site_key = get_option('attc_recaptcha_site_key'); if (!empty($site_key)): ?>
@@ -1998,6 +2021,32 @@ function attc_register_form_shortcode() {
     return ob_get_clean();
 }
 add_shortcode('attc_register_form', 'attc_register_form_shortcode');
+
+function attc_handle_email_verification() {
+    if (isset($_GET['attc_verify'], $_GET['uid'], $_GET['token'])) {
+        $user_id = (int) $_GET['uid'];
+        $token = sanitize_text_field($_GET['token']);
+        $user = get_user_by('id', $user_id);
+
+        if ($user) {
+            $saved_token = get_user_meta($user_id, 'attc_verify_token', true);
+            if ($saved_token && hash_equals($saved_token, $token)) {
+                // Token hợp lệ, kích hoạt tài khoản
+                update_user_meta($user_id, 'attc_email_verified', 1);
+                delete_user_meta($user_id, 'attc_verify_token');
+                set_transient('attc_activation_success', 'Tài khoản của bạn đã được kích hoạt thành công. Vui lòng đăng nhập.', 60);
+            } else {
+                // Token không hợp lệ hoặc đã hết hạn
+                set_transient('attc_login_errors', 'Liên kết kích hoạt không chính xác hoặc đã được sử dụng. Vui lòng thử lại hoặc liên hệ hỗ trợ.', 60);
+            }
+        } else {
+            set_transient('attc_login_errors', 'Người dùng không tồn tại.', 60);
+        }
+        wp_redirect(site_url('/dang-nhap/'));
+        exit;
+    }
+}
+add_action('template_redirect', 'attc_handle_email_verification');
 
 function attc_handle_custom_registration_form() {
     // Chỉ thực thi khi form đăng ký được gửi đi
@@ -2045,10 +2094,23 @@ function attc_handle_custom_registration_form() {
                 // Đặt transient thông báo thành công
                 set_transient('attc_registration_success', 'Đăng ký thành công! Bạn đã được tự động đăng nhập.', 30);
                 
-                // Tự động đăng nhập
-                wp_set_current_user($user_id, $username);
-                wp_set_auth_cookie($user_id, true, false);
-                wp_redirect(site_url('/chuyen-doi-giong-noi/'));
+                // Đặt trạng thái chưa xác thực và gửi email
+                update_user_meta($user_id, 'attc_email_verified', 0);
+                $token = wp_generate_password(32, false, false);
+                update_user_meta($user_id, 'attc_verify_token', $token);
+
+                $verify_link = add_query_arg([
+                    'attc_verify' => 1,
+                    'uid' => $user_id,
+                    'token' => $token,
+                ], home_url('/')); // Gửi đến trang chủ, hook sẽ bắt và chuyển hướng đến trang đăng nhập
+
+                $subject = 'Kích hoạt tài khoản của bạn tại AudioAI';
+                $message = "Xin chào {$username},\n\nCảm ơn bạn đã đăng ký. Vui lòng nhấp vào liên kết sau để kích hoạt tài khoản của bạn:\n{$verify_link}\n\nNếu bạn không thực hiện đăng ký này, vui lòng bỏ qua email.";
+                wp_mail($email, $subject, $message);
+
+                set_transient('attc_registration_info', 'Đăng ký thành công. Vui lòng kiểm tra Email của bạn để kích hoạt tài khoản.', 300);
+                wp_redirect(site_url('/dang-ky'));
                 exit;
             } else {
                 // Nếu wp_create_user thất bại, lấy lỗi và hiển thị

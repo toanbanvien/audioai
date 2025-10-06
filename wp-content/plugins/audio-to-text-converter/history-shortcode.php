@@ -39,8 +39,13 @@ function attc_history_shortcode() {
         .attc-userbar .upgrade-btn { background-color: #3498db; color: white; }
         .attc-userbar .history-btn { background-color: #95a5a6; color: white; }
         .attc-userbar .logout-btn { background-color: #e74c3c; color: white; margin-left: 0.5rem; }
+        #attc-back-to-plan { color: white; padding: 0.6rem 1rem; border-radius: 5px; font-weight: 500; transition: background-color 0.2s;background-color: #2271b1; margin-bottom: 1rem;}
     </style>
+
+  
     <div class="attc-history-wrap">
+    <a href="/chuyen-doi-giong-noi"><button id="attc-back-to-plan">← Quay lại chuyển đổi giọng nói</button></a>
+
         <div class="attc-userbar">
             <p class="attc-username"><strong><?php echo esc_html($display_name); ?></strong></p>
             <div>
@@ -73,8 +78,12 @@ function attc_history_shortcode() {
                         <td>
                             <?php 
                                 $type = $item['type'] ?? 'N/A';
+                                $meta = $item['meta'] ?? [];
+                                $reason = $meta['reason'] ?? '';
                                 if ($type === 'credit') {
                                     echo '<span class="attc-type-credit">Nạp tiền</span>';
+                                } elseif ($type === 'conversion_free' || $reason === 'free_tier') {
+                                    echo '<span class="attc-type-debit">Miễn phí</span>';
                                 } elseif ($type === 'debit') {
                                     echo '<span class="attc-type-debit">Chuyển đổi</span>';
                                 } else {
@@ -85,8 +94,12 @@ function attc_history_shortcode() {
                         <td>
                             <?php 
                                 $amount = (int)($item['amount'] ?? 0);
-                                $prefix = ($type === 'credit') ? '+' : '-';
-                                echo $prefix . ' ' . number_format($amount) . 'đ';
+                                if ($type === 'conversion_free' || ($meta['reason'] ?? '') === 'free_tier') {
+                                    echo '0đ';
+                                } else {
+                                    $prefix = ($type === 'credit') ? '+' : '-';
+                                    echo $prefix . ' ' . number_format($amount) . 'đ';
+                                }
                             ?>
                         </td>
                         <td>
@@ -98,6 +111,19 @@ function attc_history_shortcode() {
                                 } elseif ($reason === 'audio_conversion') {
                                     $duration = (int)($meta['duration'] ?? 0);
                                     echo 'File ' . round($duration / 60, 2) . ' phút.';
+                                    if (!empty($meta['transcript'])) {
+                                        $download_nonce = wp_create_nonce('attc_download_' . $item['timestamp']);
+                                        $download_url = add_query_arg([
+                                            'action' => 'attc_download_transcript',
+                                            'timestamp' => $item['timestamp'],
+                                            'nonce' => $download_nonce,
+                                        ], home_url());
+                                        echo '<br><a href="' . esc_url($download_url) . '" class="attc-download-link">Tải về (.docx)</a>';
+                                        echo '<div class="attc-transcript-content">' . nl2br(esc_html($meta['transcript'])) . '</div>';
+                                    }
+                                } elseif ($reason === 'free_tier' || $type === 'conversion_free') {
+                                    $duration = (int)($meta['duration'] ?? 0);
+                                    echo 'Miễn phí - File ' . round($duration / 60, 2) . ' phút.';
                                     if (!empty($meta['transcript'])) {
                                         $download_nonce = wp_create_nonce('attc_download_' . $item['timestamp']);
                                         $download_url = add_query_arg([
