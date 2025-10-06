@@ -890,14 +890,17 @@ function attc_handle_form_submission() {
                 'status' => 'queued',
                 'created_at' => time(),
             ];
-            update_option('attc_job_' . $job_id, $job, false);
+            // Lưu job vào option, bỏ autoload=false để get_option trong job nền có thể đọc được
+            update_option('attc_job_' . $job_id, $job);
 
             if (!wp_next_scheduled('attc_run_job', [$job_id])) {
                 wp_schedule_single_event(time() + 1, 'attc_run_job', [$job_id]);
+                set_transient('attc_last_job_' . $user_id, $job_id, HOUR_IN_SECONDS);
             }
 
-            // Lưu job_id gần nhất cho user để client có thể polling
-            set_transient('attc_last_job_' . $user_id, $job_id, HOUR_IN_SECONDS);
+            // Lưu job_id gần nhất vào user meta để client có thể polling (ổn định hơn transient)
+            update_user_meta($user_id, 'attc_last_job', $job_id);
+            error_log(sprintf("[%s] Form Submission: Set user_meta attc_last_job for user %d to %s\n", date('Y-m-d H:i:s'), $user_id, $job_id), 3, WP_CONTENT_DIR . '/attc_debug.log');
 
             // Thông báo hàng đợi cho UI (tách khỏi transcript)
             set_transient('attc_queue_notice', 'Yêu cầu đã được đưa vào hàng đợi xử lý. Bạn có thể đóng trang hoặc chờ tại trang này, kết quả sẽ hiển thị khi hoàn tất.', 60);
@@ -923,7 +926,8 @@ add_action('rest_api_init', function () {
                 // Chưa đăng nhập: không trả 401 để tránh lỗi console, chỉ trả none
                 return new WP_REST_Response(['status' => 'none'], 200);
             }
-            $job_id = get_transient('attc_last_job_' . $user_id);
+            $job_id = get_user_meta($user_id, 'attc_last_job', true);
+            error_log(sprintf("[%s] /jobs/latest: Got user_meta attc_last_job for user %d, value: %s\n", date('Y-m-d H:i:s'), $user_id, var_export($job_id, true)), 3, WP_CONTENT_DIR . '/attc_debug.log');
             if (empty($job_id)) {
                 return new WP_REST_Response(['status' => 'none'], 200);
             }
@@ -1049,7 +1053,9 @@ add_action('rest_api_init', function () {
 // ===== Job Processor (WP-Cron) =====
 add_action('attc_run_job', 'attc_process_job', 10, 1);
 function attc_process_job($job_id) {
+    error_log(sprintf("[%s] Background job 'attc_process_job' started for job_id: %s\n", date('Y-m-d H:i:s'), $job_id), 3, WP_CONTENT_DIR . '/attc_debug.log');
     $job = get_option('attc_job_' . $job_id, []);
+    error_log(sprintf("[%s] Job data retrieved for %s: %s\n", date('Y-m-d H:i:s'), $job_id, json_encode($job)), 3, WP_CONTENT_DIR . '/attc_debug.log');
     if (empty($job) || !is_array($job)) { return; }
 
     ignore_user_abort(true);
@@ -1063,7 +1069,8 @@ function attc_process_job($job_id) {
     if (!file_exists($file_path)) {
         $job['status'] = 'failed';
         $job['error'] = 'File không tồn tại.';
-        update_option('attc_job_' . $job_id, $job, false);
+        error_log(sprintf("[%s] Job %s: Failed. Reason: File not found at %s\n", date('Y-m-d H:i:s'), $job_id, $file_path), 3, WP_CONTENT_DIR . '/attc_debug.log');
+        update_option('attc_job_' . $job_id, $job);
         return;
     }
 
@@ -1071,7 +1078,8 @@ function attc_process_job($job_id) {
     if (empty($api_key)) {
         $job['status'] = 'failed';
         $job['error'] = 'Thiếu OpenAI API Key.';
-        update_option('attc_job_' . $job_id, $job, false);
+        error_log(sprintf("[%s] Job %s: Failed. Reason: Missing OpenAI API Key.\n", date('Y-m-d H:i:s'), $job_id), 3, WP_CONTENT_DIR . '/attc_debug.log');
+        update_option('attc_job_' . $job_id, $job);
         return;
     }
 
@@ -1081,11 +1089,10 @@ function attc_process_job($job_id) {
         'model' => 'whisper-1',
         'language' => 'vi',
         'temperature' => 0,
-        // Prompt tối ưu hoá để giảm lỗi chính tả/nhầm dấu khi nói nhanh
-        'prompt' => 'Phiên âm chính xác tiếng Việt từ file ghi âm, ưu tiên viết đúng chính tả và đầy đủ dấu tiếng Việt, không thêm/bớt nội dung. Yêu cầu: (1) Viết hoa đầu câu và tên riêng, (2) Giữ nguyên dấu câu, (3) Xuống dòng tự nhiên theo ngữ nghĩa.',
         'file' => curl_file_create($file_path, mime_content_type($file_path), basename($file_path))
     ];
 
+    error_log(sprintf("[%s] Job %s: Preparing to call OpenAI API at %s\n", date('Y-m-d H:i:s'), $job_id, $api_url), 3, WP_CONTENT_DIR . '/attc_debug.log');
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $api_url);
     curl_setopt($ch, CURLOPT_POST, 1);
@@ -1098,11 +1105,13 @@ function attc_process_job($job_id) {
     $response_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curl_error = curl_error($ch);
     curl_close($ch);
+    error_log(sprintf("[%s] Job %s: cURL response. Code: %d. Body: %s. cURL Error: %s\n", date('Y-m-d H:i:s'), $job_id, $response_code, $response_body_str, $curl_error), 3, WP_CONTENT_DIR . '/attc_debug.log');
 
     if ($curl_error) {
         $job['status'] = 'failed';
         $job['error'] = 'cURL: ' . $curl_error;
-        update_option('attc_job_' . $job_id, $job, false);
+        update_option('attc_job_' . $job_id, $job);
+        if ($user_id > 0) { delete_user_meta($user_id, 'attc_last_job'); }
         return;
     }
 
@@ -1110,7 +1119,8 @@ function attc_process_job($job_id) {
     if ($response_code !== 200) {
         $job['status'] = 'failed';
         $job['error'] = isset($response_body['error']['message']) ? $response_body['error']['message'] : 'OpenAI error.';
-        update_option('attc_job_' . $job_id, $job, false);
+        update_option('attc_job_' . $job_id, $job);
+        if ($user_id > 0) { delete_user_meta($user_id, 'attc_last_job'); }
         return;
     }
 
@@ -1156,7 +1166,8 @@ function attc_process_job($job_id) {
             $job['history_timestamp'] = (int) $last_item['timestamp'];
         }
     }
-    update_option('attc_job_' . $job_id, $job, false);
+    update_option('attc_job_' . $job_id, $job);
+    error_log(sprintf("[%s] Job %s: Final status updated to 'done'.\n", date('Y-m-d H:i:s'), $job_id), 3, WP_CONTENT_DIR . '/attc_debug.log');
 
     // Dọn file tạm
     @unlink($file_path);
@@ -1180,6 +1191,12 @@ function attc_form_shortcode() {
     // Thông báo hàng đợi (nếu vừa enqueue job)
     $queue_notice = get_transient('attc_queue_notice');
     if ($queue_notice) delete_transient('attc_queue_notice');
+
+    // Nếu là lần vào trang "sạch" (không có kết quả ngay, không có thông báo hàng đợi)
+    // thì xoá marker job cũ để UI không tự hiện kết quả cũ
+    if (empty($success_message) && empty($queue_notice)) {
+        delete_user_meta($user_id, 'attc_last_job');
+    }
 
     $last_cost = get_transient('attc_last_cost');
     if ($last_cost) delete_transient('attc_last_cost');
@@ -1323,7 +1340,7 @@ function attc_form_shortcode() {
                 }
             }
         ?>
-        <?php $result_hidden = empty($success_message) && empty($queue_notice); ?>
+        <?php $result_hidden = empty($success_message); ?>
         <div class="attc-result<?php echo $result_hidden ? ' is-hidden' : ''; ?>" id="attc-result">
             <h3>Kết quả chuyển đổi:</h3>
             <div class="attc-result-text"><?php echo $success_message ? nl2br(esc_html($success_message)) : ''; ?></div>
@@ -1418,32 +1435,144 @@ function attc_form_shortcode() {
                 progressWrap.classList.remove('is-hidden');
                 startFakeProgress();
             }
-            // Hiện khối kết quả ngay khi user bắt đầu upload
-            if (resultContainer) { resultContainer.classList.remove('is-hidden'); }
         });
 
         // Polling trạng thái job mới nhất để auto hiển thị transcript
         const jobLatestUrl = '<?php echo esc_url_raw( rest_url('attc/v1/jobs/latest') ); ?>';
-        // Fallback từ server: job_id gần nhất lưu transient
-        const attcLastJobId = '<?php echo esc_js( (string) get_transient('attc_last_job_' . get_current_user_id()) ); ?>';
+        // Fallback từ server: job_id gần nhất lưu trong user meta (render vào HTML)
+        const attcLastJobId = '<?php echo esc_js( (string) get_user_meta(get_current_user_id(), 'attc_last_job', true) ); ?>';
+        // Base URL để truy vấn trạng thái theo job_id (fallback)
+        const jobStatusBase = '<?php echo esc_url_raw( rest_url('attc/v1/jobs/') ); ?>';
 
-        function applyTranscript(text){
-            if (!text) return;
+        function renderFinalResult(data) {
+            // 1. Dừng polling ngay lập tức
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+
+            // 2. Dọn dẹp UI: ẩn progress và mọi thông báo info
+            if (progressWrap) progressWrap.classList.add('is-hidden');
+            document.querySelectorAll('.attc-alert.attc-info').forEach(function(el) { el.style.display = 'none'; });
+            var qn = document.getElementById('attc-queue-notice');
+            if (qn) { qn.classList.add('is-hidden'); qn.style.display = 'none'; }
+
+            // 3. Hiển thị khối kết quả
+            if (resultContainer) { resultContainer.classList.remove('is-hidden'); }
+
+            // 4. Render văn bản
+            const text = (data.transcript && typeof data.transcript === 'string' && data.transcript.trim().length > 0) ? data.transcript : '(Không có nội dung hoặc API trả về rỗng)';
             if (resultTextBox) {
                 resultTextBox.textContent = text;
-                resultTextBox.scrollTop = resultTextBox.scrollHeight;
             }
+
+            // 5. Render nút tải về
+            let actions = document.querySelector('.attc-result-actions');
+            if (data.download_link) {
+                if (!actions) {
+                    actions = document.createElement('div');
+                    actions.className = 'attc-result-actions';
+                    if (resultContainer) resultContainer.appendChild(actions);
+                }
+                actions.innerHTML = `<a href="${data.download_link}" class="download-btn">Tải kết quả (.docx)</a>`;
+            } else if (actions) {
+                actions.innerHTML = ''; // Xóa nút tải cũ nếu có
+            }
+
+            // 6. Tự động sao chép
+            if (data.transcript && typeof data.transcript === 'string' && data.transcript.trim().length > 0) {
+                autoCopyText(data.transcript);
+            }
+
+            // 7. Cuộn tới kết quả
             if (resultContainer) {
-                resultContainer.scrollIntoView({ behavior:'smooth', block:'start' });
+                resultContainer.scrollIntoView({ behavior: 'smooth', block: 'start' });
             }
         }
 
+        // Thông báo ngắn gọn
+        function showToast(message) {
+            try {
+                var old = document.getElementById('attc-toast');
+                if (old && old.parentNode) old.parentNode.removeChild(old);
+                var t = document.createElement('div');
+                t.id = 'attc-toast';
+                t.textContent = message;
+                t.style.position = 'fixed';
+                t.style.right = '16px';
+                t.style.bottom = '16px';
+                t.style.background = '#16a34a';
+                t.style.color = '#fff';
+                t.style.padding = '10px 14px';
+                t.style.borderRadius = '8px';
+                t.style.boxShadow = '0 4px 12px rgba(0,0,0,.15)';
+                t.style.zIndex = '9999';
+                document.body.appendChild(t);
+                setTimeout(function(){ if (t && t.parentNode) t.parentNode.removeChild(t); }, 2500);
+            } catch(e) {}
+        }
+
+        // Tự động sao chép văn bản vào clipboard (có fallback)
+        function autoCopyText(text) {
+            if (!text) return;
+            try {
+                if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText(text).then(function(){
+                        showToast('Đã sao chép kết quả vào clipboard');
+                    }).catch(function(){});
+                } else {
+                    var ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.top = '-9999px';
+                    ta.style.left = '-9999px';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    try { document.execCommand('copy'); showToast('Đã sao chép kết quả vào clipboard'); } catch(e) {}
+                    document.body.removeChild(ta);
+                }
+            } catch(e) {}
+        }
+
         let pollTimer = null;
+        // Nếu có thông báo hàng đợi (sau khi upload và redirect), tự hiển thị progress
+        const queueNoticeEl = document.getElementById('attc-queue-notice');
+        if (queueNoticeEl && progressWrap) {
+            progressWrap.classList.remove('is-hidden');
+            startFakeProgress();
+        }
         function pollLatestJob(){
-            fetch(jobLatestUrl, { credentials: 'same-origin' })
-                .then(r => r.json())
+            console.log('[ATTG_DEBUG] Polling for latest job status at: ' + jobLatestUrl);
+            fetch(jobLatestUrl, { credentials: 'same-origin', headers: { 'X-WP-Nonce': (window.wpApiSettings && window.wpApiSettings.nonce) ? window.wpApiSettings.nonce : '' } })
+                .then(r => {
+                    if (!r.ok) {
+                        throw new Error('Network response was not ok: ' + r.statusText);
+                    }
+                    return r.json();
+                })
                 .then(data => {
-                    if (!data || data.status === 'none') return;
+                    console.log('[ATTG_DEBUG] Received data from /jobs/latest:', data);
+                    if (!data) return;
+
+                    // Nếu latest trả 'none' nhưng chúng ta có attcLastJobId được in từ server, thử fallback theo id
+                    if ((data.status === 'none' || !data.status) && attcLastJobId) {
+                        fetch(jobStatusBase + encodeURIComponent(attcLastJobId) + '/status', { credentials: 'same-origin', headers: { 'X-WP-Nonce': (window.wpApiSettings && window.wpApiSettings.nonce) ? window.wpApiSettings.nonce : '' } })
+                            .then(function(r){ return r.json(); })
+                            .then(function(d){
+                                if (!d) return;
+                                // Nếu server đã có transcript, render ngay
+                                if (d.status === 'done') {
+                                    renderFinalResult(d);
+                                    return;
+                                }
+                                // Nếu trạng thái done nhưng không có transcript rõ ràng, vẫn ẩn queue và loading
+                                if (d.status === 'done') {
+                                    if (progressWrap) progressWrap.classList.add('is-hidden');
+                                    var qn3 = document.getElementById('attc-queue-notice');
+                                    if (qn3) qn3.classList.add('is-hidden');
+                                }
+                            })
+                            .catch(function(){});
+                        // tiếp tục phần còn lại để vẽ toolbar nếu cần
+                    }
+
                     // Hiển thị job_id và toolbar
                     if (resultContainer) {
                         let tools = document.getElementById(resultToolbarId);
@@ -1513,42 +1642,7 @@ function attc_form_shortcode() {
                         }
                     }
                     if (data.status === 'done') {
-                        // Đảm bảo khối kết quả hiển thị
-                        if (resultContainer) { resultContainer.classList.remove('is-hidden'); }
-                        
-                        // Gán transcript (kể cả khi rỗng) và cuộn vào tầm nhìn
-                        const text = (typeof data.transcript === 'string') ? data.transcript : '';
-                        if (text && text.trim().length > 0) {
-                            applyTranscript(text);
-                        } else if (resultTextBox) {
-                            resultTextBox.textContent = '(Không có nội dung hoặc API trả về rỗng)';
-                        }
-                        
-                        // Ẩn loading + ẩn thông báo hàng đợi
-                        if (progressWrap) progressWrap.classList.add('is-hidden');
-                        const qn = document.getElementById('attc-queue-notice');
-                        if (qn) { qn.classList.add('is-hidden'); }
-                        
-                        // Hiển thị nút tải .docx nếu API trả link
-                        if (data.download_link) {
-                            let actions = document.querySelector('.attc-result-actions');
-                            if (!actions) {
-                                actions = document.createElement('div');
-                                actions.className = 'attc-result-actions';
-                                if (resultContainer) {
-                                    resultContainer.appendChild(actions);
-                                }
-                            }
-                            actions.innerHTML = '';
-                            const a = document.createElement('a');
-                            a.href = data.download_link;
-                            a.textContent = 'Tải kết quả (.docx)';
-                            a.className = 'download-btn';
-                            actions.appendChild(a);
-                        }
-                        
-                        // Dừng polling
-                        if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+                        renderFinalResult(data);
                     } else if (data.status === 'failed') {
                         if (progressWrap) progressWrap.classList.add('is-hidden');
                         const qn = document.getElementById('attc-queue-notice');
@@ -1572,7 +1666,9 @@ function attc_form_shortcode() {
                         if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
                     }
                 })
-                .catch(()=>{});
+                .catch(error => {
+                    console.error('[ATTG_DEBUG] Error fetching job status:', error);
+                });
         }
 
         // Bắt đầu polling mỗi 5s khi trang mở
