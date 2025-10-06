@@ -333,9 +333,6 @@ function attc_credit_wallet($user_id, $amount, $meta = []) {
 
 // ===== REST API Routes =====
 function attc_check_payment_status() {
-    if (!is_user_logged_in()) {
-        return new WP_REST_Response(['status' => 'not_logged_in'], 200);
-    }
 
     $user_id = get_current_user_id();
     $transient_key = 'attc_payment_success_' . $user_id;
@@ -352,7 +349,7 @@ add_action('rest_api_init', function () {
     register_rest_route('attc/v1', '/payment-status', [
         'methods' => 'GET',
         'callback' => 'attc_check_payment_status',
-        'permission_callback' => '__return_true',
+        'permission_callback' => 'is_user_logged_in',
     ]);
 
     register_rest_route('attc/v1', '/webhook/bank', [
@@ -365,20 +362,12 @@ add_action('rest_api_init', function () {
     register_rest_route('attc/v1', '/payment-stream', [
         'methods' => 'GET',
         'callback' => 'attc_payment_stream',
-        'permission_callback' => '__return_true',
+        'permission_callback' => 'is_user_logged_in',
     ]);
 });
 
 // SSE endpoint: trả về sự kiện "payment" khi phát hiện nạp thành công trong 60s, fallback client sẽ polling
 function attc_payment_stream(\WP_REST_Request $request) {
-    if (!is_user_logged_in()) {
-        status_header(200);
-        header('Content-Type: text/event-stream');
-        header('Cache-Control: no-cache');
-        echo ": not_logged_in\n\n";
-        flush();
-        return;
-    }
 
     $user_id = get_current_user_id();
     $transient_key = 'attc_payment_success_' . $user_id;
@@ -448,7 +437,7 @@ function attc_upgrade_shortcode() {
     <div id="attc-success-notice" class="attc-notice is-hidden">
         <p><strong>Nạp tiền thành công!</strong></p>
         <p id="attc-success-message"></p>
-        <p>Trang sẽ được tải lại sau giây lát để cập nhật số dư...</p>
+        <button id="attc-confirm-payment" class="attc-btn-primary">OK, vào chuyển đổi</button>
     </div>
 
     <style>
@@ -584,9 +573,35 @@ function attc_render_wallet_dashboard() {
         wp_die('Bạn không có quyền truy cập trang này.');
     }
 
-    // Handle manual top-up
+    // Handle manual top-up & debit
     $message = '';
-    if (!empty($_POST['attc_manual_topup'])) {
+    if (!empty($_POST['attc_manual_debit'])) {
+        check_admin_referer('attc_manual_debit_action', 'attc_manual_debit_nonce');
+
+        $user_identifier = sanitize_text_field($_POST['attc_user_identifier_debit'] ?? '');
+        $amount = (int) ($_POST['attc_amount_debit'] ?? 0);
+        $reason = sanitize_text_field($_POST['attc_reason_debit'] ?? 'Manual debit by admin');
+
+        $user = false;
+        if (is_numeric($user_identifier)) {
+            $user = get_user_by('id', (int)$user_identifier);
+        } elseif (is_email($user_identifier)) {
+            $user = get_user_by('email', $user_identifier);
+        } else {
+            $user = get_user_by('login', $user_identifier);
+        }
+
+        if ($user && $amount > 0) {
+            $result = attc_charge_wallet($user->ID, $amount, ['reason' => 'manual_debit', 'admin_note' => $reason]);
+            if (is_wp_error($result)) {
+                $message = '<div class="notice notice-error is-dismissible"><p>Lỗi: ' . $result->get_error_message() . '</p></div>';
+            } else {
+                $message = '<div class="notice notice-success is-dismissible"><p>Đã trừ ' . number_format($amount) . 'đ từ tài khoản ' . esc_html($user->user_login) . '.</p></div>';
+            }
+        } else {
+            $message = '<div class="notice notice-error is-dismissible"><p>Không tìm thấy người dùng hoặc số tiền không hợp lệ.</p></div>';
+        }
+    } elseif (!empty($_POST['attc_manual_topup'])) {
         check_admin_referer('attc_manual_topup_action', 'attc_manual_topup_nonce');
 
         $user_identifier = sanitize_text_field($_POST['attc_user_identifier'] ?? '');
@@ -595,11 +610,9 @@ function attc_render_wallet_dashboard() {
         $user = false;
         if (is_numeric($user_identifier)) {
             $user = get_user_by('id', (int)$user_identifier);
-        }
-        if (!$user) {
+        } elseif (is_email($user_identifier)) {
             $user = get_user_by('email', $user_identifier);
-        }
-        if (!$user) {
+        } else {
             $user = get_user_by('login', $user_identifier);
         }
 

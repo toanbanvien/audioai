@@ -81,8 +81,13 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         if (notice) {
             notice.classList.remove('is-hidden');
+            const confirmBtn = document.getElementById('attc-confirm-payment');
+            if (confirmBtn) {
+                confirmBtn.addEventListener('click', () => {
+                    window.location.href = '/chuyen-doi-giong-noi/';
+                });
+            }
         }
-        setTimeout(() => { window.location.href = '/chuyen-doi-giong-noi/'; }, 2500);
     }
 
     planButtons.forEach(button => {
