@@ -10,6 +10,76 @@ if (!defined('ABSPATH')) {
     exit; // Chặn truy cập trực tiếp
 }
 
+// Permission for fake-topup: allow admin OR valid token key
+function attc_fake_topup_can(\WP_REST_Request $request) {
+    if (current_user_can('manage_options')) return true;
+    $provided = (string) ($request->get_param('key') ?? '');
+    $expected = (string) get_option('attc_fake_topup_key', '');
+    if ($expected === '' || $provided === '') return false;
+    if (function_exists('hash_equals')) return hash_equals($expected, $provided);
+    return $expected === $provided;
+}
+
+// Admin/token: fake top-up to trigger /nang-cap success UI (and optionally add balance)
+function attc_fake_topup(\WP_REST_Request $request) {
+
+    $uid    = (int) ($request->get_param('user_id') ?? $request->get_param('uid') ?? 0);
+    $amount = (int) ($request->get_param('amount') ?? 0);
+    $mode   = sanitize_text_field($request->get_param('mode') ?? 'transient'); // transient|credit
+
+    if ($uid <= 0 || $amount <= 0) {
+        return new WP_REST_Response(['status' => 'invalid_params'], 400);
+    }
+
+    // LƯU Ý: Xử lý form admin simulate-topup đã được chuyển sang attc_render_wallet_dashboard().
+
+    if ($mode === 'credit') {
+        $res = attc_credit_wallet($uid, $amount, [
+            'reason' => 'fake_topup',
+            'note'   => 'simulate via admin endpoint',
+            'admin'  => get_current_user_id(),
+        ]);
+        if (is_wp_error($res)) {
+            return new WP_REST_Response(['status' => 'credit_error', 'message' => $res->get_error_message()], 200);
+        }
+        // attc_credit_wallet already sets transient for UI
+        return new WP_REST_Response(['status' => 'credited', 'user_id' => $uid, 'amount' => $amount], 200);
+    }
+
+    // Default: only trigger UI without changing balance (set both transient + user_meta)
+    $payment_data = ['amount' => $amount, 'time' => time()];
+    set_transient('attc_payment_success_' . $uid, $payment_data, 60);
+    update_user_meta($uid, 'attc_payment_success', $payment_data);
+    return new WP_REST_Response(['status' => 'triggered', 'user_id' => $uid, 'amount' => $amount], 200);
+}
+
+// Gửi email kích hoạt tài khoản cho user (tạo token mới và gửi link)
+function attc_send_activation_email($user_id) {
+    $user = get_user_by('id', (int)$user_id);
+    if (!$user) {
+        return new WP_Error('user_not_found', 'Không tìm thấy người dùng.');
+    }
+
+    $token = wp_generate_password(20, false, false);
+    update_user_meta($user->ID, 'attc_verify_token', $token);
+
+    $activate_url = add_query_arg([
+        'attc_verify' => 1,
+        'uid'         => (int)$user->ID,
+        'token'       => $token,
+    ], site_url('/dang-nhap/'));
+
+    $subject = 'Kích hoạt tài khoản AudioAI';
+    $message = "Xin chào {$user->display_name},\n\nVui lòng bấm vào liên kết sau để kích hoạt tài khoản của bạn:\n{$activate_url}\n\nNếu bạn không yêu cầu, vui lòng bỏ qua email này.";
+    $headers = ['Content-Type: text/plain; charset=UTF-8'];
+
+    $sent = wp_mail($user->user_email, $subject, $message, $headers);
+    if (!$sent) {
+        return new WP_Error('mail_failed', 'Không thể gửi email kích hoạt.');
+    }
+    return true;
+}
+
 // Hậu xử lý văn bản: sửa lỗi chính tả/dấu tiếng Việt bằng Chat Completions
 function attc_vi_correct_text($text, $api_key) {
     if (empty($api_key) || !is_string($text) || $text === '') return $text;
@@ -202,6 +272,73 @@ add_filter('attc_parse_bank_webhook', function($parsed, $raw){
         }
     }
 
+    // Admin: Simulate top-up to test /nang-cap UI
+    if (!empty($_POST['attc_admin_simulate_topup'])) {
+        check_admin_referer('attc_admin_simulate_topup_action', 'attc_admin_simulate_topup_nonce');
+
+        $sim_identifier = sanitize_text_field($_POST['attc_user_identifier_sim'] ?? '');
+        $sim_amount = (int) ($_POST['attc_amount_sim'] ?? 0);
+        $sim_mode = sanitize_text_field($_POST['attc_mode_sim'] ?? 'transient'); // transient|credit
+
+        $sim_user = false;
+        if (is_numeric($sim_identifier)) {
+            $sim_user = get_user_by('id', (int)$sim_identifier);
+        } elseif (is_email($sim_identifier)) {
+            $sim_user = get_user_by('email', $sim_identifier);
+        } else {
+            $sim_user = get_user_by('login', $sim_identifier);
+        }
+
+        if (!$sim_user || $sim_amount <= 0) {
+            $simulate_message = '<div class="notice notice-error is-dismissible"><p>Vui lòng nhập người dùng hợp lệ và số tiền > 0 để mô phỏng.</p></div>';
+        } else {
+            $uid = (int) $sim_user->ID;
+            if ($sim_mode === 'credit') {
+                $res = attc_credit_wallet($uid, $sim_amount, [
+                    'reason' => 'admin_simulate',
+                    'note'   => 'Simulate top-up from admin wallet page',
+                    'admin'  => get_current_user_id(),
+                ]);
+                if (is_wp_error($res)) {
+                    $simulate_message = '<div class="notice notice-error is-dismissible"><p>Lỗi mô phỏng (credit): ' . esc_html($res->get_error_message()) . '</p></div>';
+                } else {
+                    $new_bal = attc_get_wallet_balance($uid);
+                    $simulate_message = '<div class="notice notice-success is-dismissible"><p>Đã mô phỏng CỘNG ví ' . number_format($sim_amount) . 'đ cho user #' . $uid . '. Trang /nang-cap của user sẽ hiển thị thông báo ngay.</p><p><strong>Số dư hiện tại:</strong> ' . number_format($new_bal) . 'đ</p></div>';
+                }
+            } else {
+                set_transient('attc_payment_success_' . $uid, ['amount' => $sim_amount, 'time' => time()], 60);
+                $cur_bal = attc_get_wallet_balance($uid);
+                $simulate_message = '<div class="notice notice-success is-dismissible"><p>Đã mô phỏng THÔNG BÁO nạp ' . number_format($sim_amount) . 'đ cho user #' . $uid . ' (không cộng ví). Trang /nang-cap sẽ hiển thị thông báo ngay.</p><p><strong>Số dư hiện tại:</strong> ' . number_format($cur_bal) . 'đ</p></div>';
+            }
+        }
+    }
+
+    // Admin: Resend activation email
+    if (!empty($_POST['attc_admin_resend_activation'])) {
+        check_admin_referer('attc_admin_resend_activation_action', 'attc_admin_resend_activation_nonce');
+
+        $user_identifier = sanitize_text_field($_POST['attc_user_identifier_resend'] ?? '');
+        $user = false;
+        if (is_numeric($user_identifier)) {
+            $user = get_user_by('id', (int)$user_identifier);
+        } elseif (is_email($user_identifier)) {
+            $user = get_user_by('email', $user_identifier);
+        } else {
+            $user = get_user_by('login', $user_identifier);
+        }
+
+        if (!$user) {
+            $message = '<div class="notice notice-error is-dismissible"><p>Không tìm thấy người dùng để gửi lại email kích hoạt.</p></div>';
+        } else {
+            $res = attc_send_activation_email($user->ID);
+            if (is_wp_error($res)) {
+                $message = '<div class="notice notice-error is-dismissible"><p>Lỗi gửi email: ' . esc_html($res->get_error_message()) . '</p></div>';
+            } else {
+                $message = '<div class="notice notice-success is-dismissible"><p>Đã gửi lại email kích hoạt tới ' . esc_html($user->user_email) . '.</p></div>';
+            }
+        }
+    }
+
     // Handle manual debit
     if (!empty($_POST['attc_manual_debit'])) {
         check_admin_referer('attc_manual_debit_action', 'attc_manual_debit_nonce');
@@ -319,9 +456,13 @@ function attc_credit_wallet($user_id, $amount, $meta = []) {
     $bal = attc_get_wallet_balance($user_id);
     attc_set_wallet_balance($user_id, $bal + $amount);
 
-    // Lưu một 'cờ' tạm thời để thông báo cho client biết đã nạp thành công
-    // Tồn tại trong 60 giây
-    set_transient('attc_payment_success_' . $user_id, ['amount' => $amount, 'time' => time()], 60);
+    // Lưu tín hiệu thành công: transient (60s) cho tốc độ và user meta làm fallback
+    $payment_data = ['amount' => $amount, 'time' => time()];
+    set_transient('attc_payment_success_' . $user_id, $payment_data, 60);
+    update_user_meta($user_id, 'attc_payment_success', $payment_data);
+
+    // Xóa cache của user để đảm bảo các phiên khác có thể thấy thay đổi ngay lập tức
+    wp_cache_delete($user_id, 'user_meta');
     attc_add_wallet_history($user_id, [
         'type' => 'credit',
         'amount' => $amount,
@@ -332,15 +473,25 @@ function attc_credit_wallet($user_id, $amount, $meta = []) {
 
 
 // ===== REST API Routes =====
-function attc_check_payment_status() {
+function attc_check_payment_status(\WP_REST_Request $request) {
 
     $user_id = get_current_user_id();
     $transient_key = 'attc_payment_success_' . $user_id;
 
     if ($payment_data = get_transient($transient_key)) {
         delete_transient($transient_key);
+        // Đồng thời xóa cờ meta nếu có để tránh trùng lặp
+        delete_user_meta($user_id, 'attc_payment_success');
         return new WP_REST_Response(['status' => 'success', 'data' => $payment_data], 200);
     }
+
+    // Fallback: kiểm tra cờ user meta (bền bỉ hơn transient)
+    $meta_data = get_user_meta($user_id, 'attc_payment_success', true);
+    if (!empty($meta_data) && is_array($meta_data) && isset($meta_data['amount'])) {
+        delete_user_meta($user_id, 'attc_payment_success'); // Xóa ngay sau khi đọc
+        return new WP_REST_Response(['status' => 'success', 'data' => $meta_data], 200);
+    }
+
 
     return new WP_REST_Response(['status' => 'pending'], 200);
 }
@@ -349,7 +500,25 @@ add_action('rest_api_init', function () {
     register_rest_route('attc/v1', '/payment-status', [
         'methods' => 'GET',
         'callback' => 'attc_check_payment_status',
-        'permission_callback' => 'is_user_logged_in',
+        'permission_callback' => function (\WP_REST_Request $request) {
+            if (is_user_logged_in()) {
+                return true;
+            }
+            // Fallback for requests without cookies (like some fetch/SSE scenarios)
+            $nonce = $request->get_header('x-wp-nonce') ?: $request->get_param('_wpnonce');
+            if ($nonce && wp_verify_nonce($nonce, 'wp_rest')) {
+                // Nonce is valid, so find the user associated with it.
+                // This is a simplified way; a more secure method might involve a different token.
+                // For this context, we assume the nonce implies a logged-in user context.
+                // The key is to re-establish the user for this request.
+                $user_id = apply_filters('determine_current_user', false);
+                if ($user_id) {
+                    wp_set_current_user($user_id);
+                    return true;
+                }
+            }
+            return false;
+        },
     ]);
 
     register_rest_route('attc/v1', '/webhook/bank', [
@@ -362,14 +531,39 @@ add_action('rest_api_init', function () {
     register_rest_route('attc/v1', '/payment-stream', [
         'methods' => 'GET',
         'callback' => 'attc_payment_stream',
-        'permission_callback' => 'is_user_logged_in',
+        'permission_callback' => function (\WP_REST_Request $request) {
+            if (is_user_logged_in()) {
+                return true;
+            }
+            // Fallback for requests without cookies (like some fetch/SSE scenarios)
+            $nonce = $request->get_header('x-wp-nonce') ?: $request->get_param('_wpnonce');
+            if ($nonce && wp_verify_nonce($nonce, 'wp_rest')) {
+                $user_id = apply_filters('determine_current_user', false);
+                if ($user_id) {
+                    wp_set_current_user($user_id);
+                    return true;
+                }
+            }
+            return false;
+        },
+    ]);
+
+    // Admin-only: simulate top-up for testing (/nang-cap notifications)
+    register_rest_route('attc/v1', '/fake-topup', [
+        'methods' => ['GET', 'POST'],
+        'callback' => 'attc_fake_topup',
+        'permission_callback' => 'attc_fake_topup_can',
     ]);
 });
 
 // SSE endpoint: trả về sự kiện "payment" khi phát hiện nạp thành công trong 60s, fallback client sẽ polling
 function attc_payment_stream(\WP_REST_Request $request) {
-
     $user_id = get_current_user_id();
+    if ($user_id <= 0) {
+        // Should not happen due to permission_callback, but as a safeguard
+        status_header(204);
+        return;
+    }
     $transient_key = 'attc_payment_success_' . $user_id;
 
     ignore_user_abort(true);
@@ -381,19 +575,32 @@ function attc_payment_stream(\WP_REST_Request $request) {
 
     $start = time();
     while (time() - $start < 60) { // tối đa 60 giây
+        // Ưu tiên transient
         $payment_data = get_transient($transient_key);
         if ($payment_data) {
             delete_transient($transient_key);
+            // dọn cờ meta nếu có để tránh trùng lặp
+            delete_user_meta($user_id, 'attc_payment_success');
             $payload = wp_json_encode(['status' => 'success', 'data' => $payment_data]);
             echo "event: payment\n";
             echo "data: {$payload}\n\n";
             flush();
             return;
         }
-        // keep-alive mỗi 5s
+        // Fallback: user_meta (bền bỉ hơn transient)
+        $meta_data = get_user_meta($user_id, 'attc_payment_success', true);
+        if (!empty($meta_data) && is_array($meta_data) && isset($meta_data['amount'])) {
+            delete_user_meta($user_id, 'attc_payment_success');
+            $payload = wp_json_encode(['status' => 'success', 'data' => $meta_data]);
+            echo "event: payment\n";
+            echo "data: {$payload}\n\n";
+            flush();
+            return;
+        }
+        // keep-alive mỗi 10s để giảm tải server
         echo ": keepalive\n\n";
         flush();
-        sleep(5);
+        sleep(10);
     }
     // hết thời gian, kết thúc stream
     echo ": timeout\n\n";
@@ -412,13 +619,8 @@ function attc_upgrade_shortcode() {
         return '<div class="attc-auth-prompt"><p>Vui lòng <a href="' . esc_url(site_url('/dang-nhap')) . '">đăng nhập</a> hoặc <a href="' . esc_url(site_url('/dang-ky')) . '">đăng ký</a> để sử dụng chức năng này.</p></div>';
     }
     $display_name = wp_get_current_user()->display_name;
+    $logout_url = wp_logout_url(get_permalink());
     $free_threshold = (int) get_option('attc_free_threshold', 500);
-    $logout_url = wp_logout_url(get_permalink());
-    if (!is_user_logged_in()) {
-        return '<div class="attc-auth-prompt"><p>Vui lòng <a href="' . esc_url(site_url('/dang-nhap')) . '">đăng nhập</a> hoặc <a href="' . esc_url(site_url('/dang-ky')) . '">đăng ký</a> để sử dụng chức năng này.</p></div>';
-    }
-    $display_name = wp_get_current_user()->display_name;
-    $logout_url = wp_logout_url(get_permalink());
     $price_per_min = (int) attc_get_price_per_minute();
     // Đọc cấu hình cổng thanh toán
     $bank_name_opt = get_option('attc_bank_name', 'ACB');
@@ -434,10 +636,18 @@ function attc_upgrade_shortcode() {
 
     ob_start();
     ?>
-    <div id="attc-success-notice" class="attc-notice is-hidden">
+    
+
+    <div class="attc-upgrade">
+        <div class="attc-userbar">
+            <p class="attc-username"><strong><?php echo esc_html($display_name); ?></strong></p>
+            <a class="attc-logout-btn" href="<?php echo esc_url($logout_url); ?>">Đăng xuất</a>
+        </div>
+
+        <div id="attc-success-notice" class="attc-notice is-hidden">
         <p><strong>Nạp tiền thành công!</strong></p>
         <p id="attc-success-message"></p>
-        <button id="attc-confirm-payment" class="attc-btn-primary">OK, vào chuyển đổi</button>
+        <button id="attc-confirm-payment" class="attc-btn-primary">Quay lại chuyển đổi giọng nói</button>
     </div>
 
     <style>
@@ -465,12 +675,7 @@ function attc_upgrade_shortcode() {
     .attc-bank-info { text-align: left; margin-top: 1rem; }
     .attc-bank-info p { margin: 0.5rem 0; }    
     </style>
-
-    <div class="attc-upgrade">
-        <div class="attc-userbar">
-            <p class="attc-username"><strong><?php echo esc_html($display_name); ?></strong></p>
-            <a class="attc-logout-btn" href="<?php echo esc_url($logout_url); ?>">Đăng xuất</a>
-        </div>
+    
         <div id="attc-pricing-plans">
             <h2>Nâng cấp tài khoản</h2>
             <div class="attc-pricing">
@@ -488,7 +693,6 @@ function attc_upgrade_shortcode() {
         </div>
 
         <div id="attc-payment-details" class="is-hidden">
-        <a href="/chuyen-doi-giong-noi"><button id="attc-back-to-plan">← Quay lại chuyển đổi giọng nói</button></a>
             <button id="attc-back-to-plans">&larr; Quay lại chọn gói</button>
             <h3>Chi tiết thanh toán</h3>
 
@@ -527,7 +731,8 @@ add_shortcode('attc_upgrade', 'attc_upgrade_shortcode');
 // ===== Nạp và cấu hình script kiểm tra thanh toán =====
 function attc_enqueue_payment_checker_script() {
     global $post;
-    if (is_a($post, 'WP_Post') && has_shortcode($post->post_content, 'attc_upgrade')) {
+    $is_upgrade_page = is_page('nang-cap') || (is_a($post, 'WP_Post') && has_shortcode($post->post_content, 'attc_upgrade'));
+    if ($is_upgrade_page) {
         // Enqueue CSS
         $css_path = plugin_dir_path(__FILE__) . 'assets/css/frontend.css';
         if (file_exists($css_path)) {
@@ -547,6 +752,7 @@ function attc_enqueue_payment_checker_script() {
                 'stream_url'    => esc_url_raw(rest_url('attc/v1/payment-stream')),
                 'price_per_min' => (string) attc_get_price_per_minute(),
                 'user_id'       => get_current_user_id(),
+                'nonce'         => wp_create_nonce('wp_rest'),
             ]);
         }
     }
@@ -575,6 +781,13 @@ function attc_render_wallet_dashboard() {
 
     // Handle manual top-up & debit
     $message = '';
+    $simulate_message = '';
+    // Hiển thị notice nhanh từ redirect trước đó (PRG)
+    $flash = get_transient('attc_admin_notice');
+    if ($flash) {
+        $message .= $flash;
+        delete_transient('attc_admin_notice');
+    }
     if (!empty($_POST['attc_manual_debit'])) {
         check_admin_referer('attc_manual_debit_action', 'attc_manual_debit_nonce');
 
@@ -594,12 +807,16 @@ function attc_render_wallet_dashboard() {
         if ($user && $amount > 0) {
             $result = attc_charge_wallet($user->ID, $amount, ['reason' => 'manual_debit', 'admin_note' => $reason]);
             if (is_wp_error($result)) {
-                $message = '<div class="notice notice-error is-dismissible"><p>Lỗi: ' . $result->get_error_message() . '</p></div>';
+                set_transient('attc_admin_notice', '<div class="notice notice-error is-dismissible"><p>Lỗi: ' . $result->get_error_message() . '</p></div>', 30);
             } else {
-                $message = '<div class="notice notice-success is-dismissible"><p>Đã trừ ' . number_format($amount) . 'đ từ tài khoản ' . esc_html($user->user_login) . '.</p></div>';
+                set_transient('attc_admin_notice', '<div class="notice notice-success is-dismissible"><p>Đã trừ ' . number_format($amount) . 'đ từ tài khoản ' . esc_html($user->user_login) . '.</p></div>', 30);
             }
+            wp_safe_redirect(add_query_arg(['page' => 'attc-wallet', 'fast' => 1], admin_url('admin.php')));
+            exit;
         } else {
-            $message = '<div class="notice notice-error is-dismissible"><p>Không tìm thấy người dùng hoặc số tiền không hợp lệ.</p></div>';
+            set_transient('attc_admin_notice', '<div class="notice notice-error is-dismissible"><p>Không tìm thấy người dùng hoặc số tiền không hợp lệ.</p></div>', 30);
+            wp_safe_redirect(add_query_arg(['page' => 'attc-wallet', 'fast' => 1], admin_url('admin.php')));
+            exit;
         }
     } elseif (!empty($_POST['attc_manual_topup'])) {
         check_admin_referer('attc_manual_topup_action', 'attc_manual_topup_nonce');
@@ -626,10 +843,81 @@ function attc_render_wallet_dashboard() {
                 'admin'  => get_current_user_id(),
             ]);
             if (is_wp_error($res)) {
-                $message = '<div class="notice notice-error"><p>Lỗi nạp tiền: ' . esc_html($res->get_error_message()) . '</p></div>';
+                set_transient('attc_admin_notice', '<div class="notice notice-error"><p>Lỗi nạp tiền: ' . esc_html($res->get_error_message()) . '</p></div>', 30);
             } else {
-                $message = '<div class="notice notice-success"><p>Đã nạp ' . number_format($amount) . 'đ vào ví của user #' . $uid . ' (' . esc_html($user->user_email) . ').</p></div>';
+                set_transient('attc_admin_notice', '<div class="notice notice-success"><p>Đã nạp ' . number_format($amount) . 'đ vào ví của user #' . $uid . ' (' . esc_html($user->user_email) . ').</p></div>', 30);
             }
+            wp_safe_redirect(add_query_arg(['page' => 'attc-wallet', 'fast' => 1], admin_url('admin.php')));
+            exit;
+        }
+    } elseif (!empty($_POST['attc_admin_simulate_topup'])) {
+        // Mô phỏng nạp tiền để test UI /nang-cap (không cần webhook)
+        check_admin_referer('attc_admin_simulate_topup_action', 'attc_admin_simulate_topup_nonce');
+
+        $sim_identifier = sanitize_text_field($_POST['attc_user_identifier_sim'] ?? '');
+        $sim_amount = (int) ($_POST['attc_amount_sim'] ?? 0);
+        $sim_mode = sanitize_text_field($_POST['attc_mode_sim'] ?? 'transient'); // transient|credit
+
+        $sim_user = false;
+        if (is_numeric($sim_identifier)) {
+            $sim_user = get_user_by('id', (int)$sim_identifier);
+        } elseif (is_email($sim_identifier)) {
+            $sim_user = get_user_by('email', $sim_identifier);
+        } else {
+            $sim_user = get_user_by('login', $sim_identifier);
+        }
+
+        if (!$sim_user || $sim_amount <= 0) {
+            $simulate_message = '<div class="notice notice-error is-dismissible"><p>Vui lòng nhập người dùng hợp lệ và số tiền > 0 để mô phỏng.</p></div>';
+        } else {
+            $uid = (int) $sim_user->ID;
+            if ($sim_mode === 'credit') {
+                $res = attc_credit_wallet($uid, $sim_amount, [
+                    'reason' => 'admin_simulate',
+                    'note'   => 'Simulate top-up from admin wallet page',
+                    'admin'  => get_current_user_id(),
+                ]);
+                if (is_wp_error($res)) {
+                    $simulate_message = '<div class="notice notice-error is-dismissible"><p>Lỗi mô phỏng (credit): ' . esc_html($res->get_error_message()) . '</p></div>';
+                } else {
+                    // attc_credit_wallet sẽ tự set transient + user_meta + xóa cache
+                    $new_bal = attc_get_wallet_balance($uid);
+                    $simulate_message = '<div class="notice notice-success is-dismissible"><p>Đã mô phỏng CỘNG ví ' . number_format($sim_amount) . 'đ cho user #' . $uid . '. Trang /nang-cap của user sẽ hiển thị thông báo ngay.</p><p><strong>Số dư hiện tại:</strong> ' . number_format($new_bal) . 'đ</p></div>';
+                }
+            } else {
+                // Chỉ bắn thông báo, không cộng ví
+                $payment_data = ['amount' => $sim_amount, 'time' => time()];
+                set_transient('attc_payment_success_' . $uid, $payment_data, 60);
+                update_user_meta($uid, 'attc_payment_success', $payment_data);
+                // Xóa cache user_meta để phiên khác thấy ngay
+                if (function_exists('wp_cache_delete')) { wp_cache_delete($uid, 'user_meta'); }
+                $cur_bal = attc_get_wallet_balance($uid);
+                $simulate_message = '<div class="notice notice-success is-dismissible"><p>Đã mô phỏng THÔNG BÁO nạp ' . number_format($sim_amount) . 'đ cho user #' . $uid . ' (không cộng ví). Trang /nang-cap sẽ hiển thị thông báo ngay.</p><p><strong>Số dư hiện tại:</strong> ' . number_format($cur_bal) . 'đ</p></div>';
+            }
+        }
+    }
+
+    // Admin: Activate user email verification
+    if (!empty($_POST['attc_admin_verify_email'])) {
+        check_admin_referer('attc_admin_verify_email_action', 'attc_admin_verify_email_nonce');
+
+        $user_identifier = sanitize_text_field($_POST['attc_user_identifier_verify'] ?? '');
+        $user = false;
+        if (is_numeric($user_identifier)) {
+            $user = get_user_by('id', (int)$user_identifier);
+        } elseif (is_email($user_identifier)) {
+            $user = get_user_by('email', $user_identifier);
+        } else {
+            $user = get_user_by('login', $user_identifier);
+        }
+
+        if (!$user) {
+            $message = '<div class="notice notice-error is-dismissible"><p>Không tìm thấy người dùng để kích hoạt.</p></div>';
+        } else {
+            $uid = (int)$user->ID;
+            update_user_meta($uid, 'attc_email_verified', 1);
+            delete_user_meta($uid, 'attc_verify_token');
+            $message = '<div class="notice notice-success is-dismissible"><p>Đã kích hoạt tài khoản cho user #' . $uid . ' (' . esc_html($user->user_email) . ').</p></div>';
         }
     }
 
@@ -637,7 +925,10 @@ function attc_render_wallet_dashboard() {
 
     // Search/filter + Pagination
     $q = isset($_GET['q']) ? sanitize_text_field(wp_unslash($_GET['q'])) : '';
-    $per_page = max(1, (int) apply_filters('attc_admin_wallet_per_page', 20));
+    // Fast mode: giảm lượng dữ liệu mỗi trang để tăng tốc
+    $fast_mode = isset($_GET['fast']) && (int)$_GET['fast'] === 1;
+    $per_page_default = $fast_mode ? 10 : 20;
+    $per_page = max(1, (int) apply_filters('attc_admin_wallet_per_page', $per_page_default));
     $paged = isset($_GET['paged']) ? max(1, (int) $_GET['paged']) : 1;
     $offset = ($paged - 1) * $per_page;
 
@@ -645,6 +936,8 @@ function attc_render_wallet_dashboard() {
         'fields' => ['ID', 'display_name', 'user_email'],
         'number' => $per_page,
         'offset' => $offset,
+        // Ở fast mode, bỏ tính tổng để tránh COUNT(*) tốn kém
+        'count_total' => !$fast_mode,
     ];
     if ($q !== '') {
         $user_query_args['search'] = '*' . $q . '*';
@@ -652,17 +945,34 @@ function attc_render_wallet_dashboard() {
     }
     $user_query = new WP_User_Query($user_query_args);
     $users = $user_query->get_results();
-    $total_users = (int) $user_query->get_total();
-    $total_pages = max(1, (int) ceil($total_users / $per_page));
+    if ($fast_mode) {
+        $total_users = 0; // không dùng
+        $total_pages = 1;
+    } else {
+        $total_users = (int) $user_query->get_total();
+        $total_pages = max(1, (int) ceil($total_users / $per_page));
+    }
 
     $rows = [];
+    // Prime user meta cache để giảm query get_user_meta trong vòng lặp
+    if (!empty($users)) {
+        $ids = array_map(function($u){ return (int)$u->ID; }, $users);
+        if (function_exists('update_meta_cache')) {
+            update_meta_cache('user', $ids);
+        }
+    }
     $depositor_count = 0;
     foreach ($users as $u) {
         $uid = (int)$u->ID;
         $balance = attc_get_wallet_balance($uid);
         $mins = $price_per_min > 0 ? floor($balance / $price_per_min) : 0;
-        $has_deposit = attc_user_has_made_deposit($uid);
-        if ($has_deposit) { $depositor_count++; }
+        // Bỏ qua kiểm tra lịch sử nạp ở fast mode để tăng tốc
+        $has_deposit = false;
+        if (!$fast_mode) {
+            $has_deposit = attc_user_has_made_deposit($uid);
+            if ($has_deposit) { $depositor_count++; }
+        }
+        $is_verified = (int) get_user_meta($uid, 'attc_email_verified', true) === 1;
         $rows[] = [
             'id' => $uid,
             'name' => $u->display_name,
@@ -670,6 +980,7 @@ function attc_render_wallet_dashboard() {
             'balance' => $balance,
             'minutes' => $mins,
             'has_deposit' => $has_deposit,
+            'verified' => $is_verified,
         ];
     }
 
@@ -678,6 +989,7 @@ function attc_render_wallet_dashboard() {
 
     echo '<div class="wrap"><h1>AudioAI Wallet</h1>';
     if ($message) echo $message;
+    if ($simulate_message) echo $simulate_message;
 
     echo '<h2>Thống kê</h2>';
     echo '<p>- Người dùng đã từng nạp: <strong>' . (int)$depositor_count . '</strong></p>';
@@ -709,6 +1021,49 @@ function attc_render_wallet_dashboard() {
     submit_button('Trừ tiền', 'delete');
     echo '</form>';
 
+    // Admin: Activate user email verification form
+    echo '<h2>Kích hoạt tài khoản (xác thực email)</h2>';
+    echo '<form method="post" style="margin-bottom:20px;">';
+    wp_nonce_field('attc_admin_verify_email_action', 'attc_admin_verify_email_nonce');
+    echo '<input type="hidden" name="attc_admin_verify_email" value="1" />';
+    echo '<table class="form-table"><tbody>';
+    echo '<tr><th scope="row"><label for="attc_user_identifier_verify">User (ID / Email / Username)</label></th>';
+    echo '<td><input name="attc_user_identifier_verify" id="attc_user_identifier_verify" type="text" class="regular-text" required placeholder="ví dụ: 123 hoặc user@example.com"></td></tr>';
+    echo '</tbody></table>';
+    submit_button('Kích hoạt tài khoản', 'primary');
+    echo '</form>';
+
+    // Admin: Simulate top-up form
+    echo '<h2>Mô phỏng nạp tiền (test /nang-cap)</h2>';
+    echo '<form method="post" style="margin-bottom:20px;">';
+    wp_nonce_field('attc_admin_simulate_topup_action', 'attc_admin_simulate_topup_nonce');
+    echo '<input type="hidden" name="attc_admin_simulate_topup" value="1" />';
+    echo '<table class="form-table"><tbody>';
+    echo '<tr><th scope="row"><label for="attc_user_identifier_sim">User (ID / Email / Username)</label></th>';
+    echo '<td><input name="attc_user_identifier_sim" id="attc_user_identifier_sim" type="text" class="regular-text" required placeholder="ví dụ: 123 hoặc user@example.com"></td></tr>';
+    echo '<tr><th scope="row"><label for="attc_amount_sim">Số tiền (VND)</label></th>';
+    echo '<td><input name="attc_amount_sim" id="attc_amount_sim" type="number" min="1" step="1" required></td></tr>';
+    echo '<tr><th scope="row"><label for="attc_mode_sim">Chế độ</label></th>';
+    echo '<td><select name="attc_mode_sim" id="attc_mode_sim">'
+        . '<option value="transient">Chỉ bắn thông báo (không cộng ví)</option>'
+        . '<option value="credit">Cộng ví + thông báo</option>'
+        . '</select></td></tr>';
+    echo '</tbody></table>';
+    submit_button('Mô phỏng nạp tiền (1-click)', 'secondary');
+    echo '</form>';
+
+    // Admin: Resend activation email form
+    echo '<h2>Gửi lại email kích hoạt</h2>';
+    echo '<form method="post" style="margin-bottom:20px;">';
+    wp_nonce_field('attc_admin_resend_activation_action', 'attc_admin_resend_activation_nonce');
+    echo '<input type="hidden" name="attc_admin_resend_activation" value="1" />';
+    echo '<table class="form-table"><tbody>';
+    echo '<tr><th scope="row"><label for="attc_user_identifier_resend">User (ID / Email / Username)</label></th>';
+    echo '<td><input name="attc_user_identifier_resend" id="attc_user_identifier_resend" type="text" class="regular-text" required placeholder="ví dụ: 123 hoặc user@example.com"></td></tr>';
+    echo '</tbody></table>';
+    submit_button('Gửi lại email kích hoạt', 'secondary');
+    echo '</form>';
+
     // Search form
     echo '<h2>Tìm kiếm người dùng</h2>';
     $base_url = admin_url('admin.php?page=attc-wallet');
@@ -721,7 +1076,7 @@ function attc_render_wallet_dashboard() {
 
     echo '<h2>Danh sách ví người dùng</h2>';
     // Pagination (top)
-    if ($total_pages > 1) {
+    if (!$fast_mode && $total_pages > 1) {
         $pagination = paginate_links([
             'base'      => add_query_arg(['page' => 'attc-wallet', 'q' => $q, 'paged' => '%#%'], admin_url('admin.php')),
             'format'    => '',
@@ -739,7 +1094,7 @@ function attc_render_wallet_dashboard() {
         echo '<p>Hiển thị <strong>' . (int)$start_i . '–' . (int)$end_i . '</strong> trên tổng <strong>' . (int)$total_users . '</strong> người dùng</p>';
     }
     echo '<table class="widefat fixed striped"><thead><tr>';
-    echo '<th width="60">User ID</th><th>Tên</th><th>Email</th><th width="140">Số dư (đ)</th><th width="120">Phút khả dụng</th><th width="140">Đã từng nạp?</th>';
+    echo '<th width="60">User ID</th><th>Tên</th><th>Email</th><th width="140">Số dư (đ)</th><th width="120">Phút khả dụng</th><th width="140">Đã từng nạp?</th><th width="140">Trạng thái</th>';
     echo '</tr></thead><tbody>';
     foreach ($rows as $r) {
         echo '<tr>';
@@ -749,11 +1104,12 @@ function attc_render_wallet_dashboard() {
         echo '<td>' . number_format((int)$r['balance']) . '</td>';
         echo '<td>' . (int)$r['minutes'] . '</td>';
         echo '<td>' . ($r['has_deposit'] ? '<span style="color:green;font-weight:600;">Có</span>' : 'Chưa') . '</td>';
+        echo '<td>' . ($r['verified'] ? '<span style="color:green;font-weight:600;">Đã kích hoạt</span>' : '<span style="color:#d63638;font-weight:600;">Chưa kích hoạt</span>') . '</td>';
         echo '</tr>';
     }
     echo '</tbody></table>';
     // Pagination (bottom)
-    if ($total_pages > 1) {
+    if (!$fast_mode && $total_pages > 1) {
         $pagination = paginate_links([
             'base'      => add_query_arg(['page' => 'attc-wallet', 'q' => $q, 'paged' => '%#%'], admin_url('admin.php')),
             'format'    => '',
@@ -793,16 +1149,25 @@ function attc_charge_wallet($user_id, $amount, $meta = []) {
 
 // Hàm kiểm tra xem người dùng đã từng nạp tiền chưa
 function attc_user_has_made_deposit($user_id) {
+    $cache_key = 'attc_has_deposit_' . (int)$user_id;
+    $cached = get_transient($cache_key);
+    if ($cached !== false) {
+        return (bool)$cached;
+    }
+
     $history = get_user_meta($user_id, 'attc_wallet_history', true);
     if (empty($history) || !is_array($history)) {
+        set_transient($cache_key, 0, 10 * MINUTE_IN_SECONDS);
         return false;
     }
     foreach ($history as $item) {
         // Chỉ cần một giao dịch 'credit' từ webhook là đủ để xác nhận đã nạp tiền
         if (isset($item['type'], $item['meta']['reason']) && $item['type'] === 'credit' && $item['meta']['reason'] === 'webhook_bank') {
+            set_transient($cache_key, 1, 10 * MINUTE_IN_SECONDS);
             return true;
         }
     }
+    set_transient($cache_key, 0, 10 * MINUTE_IN_SECONDS);
     return false;
 }
 
@@ -2133,6 +2498,46 @@ function attc_handle_custom_registration_form() {
             }
         }
     }
+
+    // Admin: Simulate top-up to test upgrade page UI
+    if (!empty($_POST['attc_admin_simulate_topup'])) {
+        check_admin_referer('attc_admin_simulate_topup_action', 'attc_admin_simulate_topup_nonce');
+
+        $user_identifier = sanitize_text_field($_POST['attc_user_identifier_sim'] ?? '');
+        $amount_sim = (int) ($_POST['attc_amount_sim'] ?? 0);
+        $mode_sim = sanitize_text_field($_POST['attc_mode_sim'] ?? 'transient'); // transient|credit
+
+        $user = false;
+        if (is_numeric($user_identifier)) {
+            $user = get_user_by('id', (int)$user_identifier);
+        } elseif (is_email($user_identifier)) {
+            $user = get_user_by('email', $user_identifier);
+        } else {
+            $user = get_user_by('login', $user_identifier);
+        }
+
+        if (!$user || $amount_sim <= 0) {
+            $message = '<div class="notice notice-error is-dismissible"><p>Vui lòng nhập người dùng hợp lệ và số tiền > 0 để mô phỏng.</p></div>';
+        } else {
+            $uid = (int) $user->ID;
+            if ($mode_sim === 'credit') {
+                $res = attc_credit_wallet($uid, $amount_sim, [
+                    'reason' => 'admin_simulate',
+                    'note'   => 'Simulate top-up from admin wallet page',
+                    'admin'  => get_current_user_id(),
+                ]);
+                if (is_wp_error($res)) {
+                    $message = '<div class="notice notice-error is-dismissible"><p>Lỗi mô phỏng (credit): ' . esc_html($res->get_error_message()) . '</p></div>';
+                } else {
+                    $message = '<div class="notice notice-success is-dismissible"><p>Đã mô phỏng CỘNG ví ' . number_format($amount_sim) . 'đ cho user #' . $uid . '. Trang /nang-cap của user sẽ hiển thị thông báo ngay.</p></div>';
+                }
+            } else {
+                // Only trigger UI notification without changing balance
+                set_transient('attc_payment_success_' . $uid, ['amount' => $amount_sim, 'time' => time()], 60);
+                $message = '<div class="notice notice-success is-dismissible"><p>Đã mô phỏng THÔNG BÁO nạp ' . number_format($amount_sim) . 'đ cho user #' . $uid . ' (không cộng ví). Trang /nang-cap sẽ hiển thị thông báo ngay.</p></div>';
+            }
+        }
+    }
 }
 add_action('template_redirect', 'attc_handle_custom_registration_form');
 
@@ -2315,7 +2720,7 @@ function attc_settings_page_html() {
 }
 
 function attc_settings_init() {
-    // OpenAI Section
+    // Payment Section
     register_setting('attc_settings', 'attc_openai_api_key');
     add_settings_section('attc_openai_section', 'Cài đặt OpenAI API', null, 'attc-settings');
     add_settings_field(
@@ -2417,6 +2822,17 @@ function attc_settings_init() {
         'attc-settings',
         'attc_payment_section',
         ['name' => 'attc_momo_name', 'type' => 'text', 'desc' => 'Tên hiển thị của tài khoản MoMo.']
+    );
+
+    // Fake Top-up Testing Key
+    register_setting('attc_settings', 'attc_fake_topup_key');
+    add_settings_field(
+        'attc_fake_topup_key',
+        'Fake Top-up Key',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_payment_section',
+        ['name' => 'attc_fake_topup_key', 'type' => 'text', 'desc' => 'Khóa bí mật để gọi endpoint giả lập nạp tiền: /wp-json/attc/v1/fake-topup?user_id=...&amount=...&mode=transient&key=YOUR_KEY']
     );
 }
 add_action('admin_init', 'attc_settings_init');

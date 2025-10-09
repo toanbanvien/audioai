@@ -61,3 +61,4 @@
 .attc-qr-fallback { color: #6b7280;font-style: italic; }
 .attc-user-name { margin: 0.3rem 0 0.6rem; color: #2c3e50; }
 button.attc-back-to-plans, button#attc-back-to-plans,button#attc-back-to-plan {background-color: #2271b1;margin-bottom: 1rem;}
+#attc-confirm-payment {background-color: #000000;margin-bottom: 1rem;}
