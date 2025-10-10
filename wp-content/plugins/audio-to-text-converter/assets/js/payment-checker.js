@@ -112,7 +112,7 @@ document.addEventListener('DOMContentLoaded', function() {
             notice.className = 'attc-notice';
             notice.style.display = 'none';
             notice.innerHTML = [
-                '<p><strong>Nạp tiền thành công!</strong></p>',
+                '<p style="font-size:28px"><strong>Nạp tiền thành công!</strong></p>',
                 '<p id="attc-success-message"></p>',
                 '<button id="attc-confirm-payment" class="attc-btn-primary">Quay lại chuyển đổi giọng nói</button>'
             ].join('');

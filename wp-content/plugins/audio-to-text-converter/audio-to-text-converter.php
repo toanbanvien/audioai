@@ -645,7 +645,7 @@ function attc_upgrade_shortcode() {
         </div>
 
         <div id="attc-success-notice" class="attc-notice is-hidden">
-        <p><strong>Nạp tiền thành công!</strong></p>
+        <p style="font-size:28px"><strong>Nạp tiền thành công!</strong></p>
         <p id="attc-success-message"></p>
         <button id="attc-confirm-payment" class="attc-btn-primary">Quay lại chuyển đổi giọng nói</button>
     </div>
@@ -673,7 +673,8 @@ function attc_upgrade_shortcode() {
     .attc-payment-column h4 { margin-top: 0; margin-bottom: 1rem; }
     .attc-qr-code img { max-width: 250px; height: auto; margin: 0 auto; }
     .attc-bank-info { text-align: left; margin-top: 1rem; }
-    .attc-bank-info p { margin: 0.5rem 0; }    
+    .attc-bank-info p { margin: 0.5rem 0; }
+    #attc-success-message{font-weight: bold;color: green;font-size: 22px;}  
     </style>
     
         <div id="attc-pricing-plans">
