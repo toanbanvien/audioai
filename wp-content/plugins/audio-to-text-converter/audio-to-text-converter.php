@@ -1514,28 +1514,29 @@ function attc_process_job($job_id) {
     $transcript = '';
     $has_segments = isset($response_body['segments']) && is_array($response_body['segments']);
     if ($has_segments) {
-        $parts = [];
+        $out = '';
         $prev_lang = null;
         $found_vi = false; $found_en = false;
         foreach ($response_body['segments'] as $seg) {
-            $seg_text = is_array($seg) && isset($seg['text']) ? (string)$seg['text'] : '';
+            $seg_text = is_array($seg) && isset($seg['text']) ? trim((string)$seg['text']) : '';
             if ($seg_text === '') continue;
             $lang = attc_detect_lang_vi_en($seg_text);
             if ($lang === 'vi') { $found_vi = true; } else { $found_en = true; }
             if ($prev_lang !== null && $lang !== $prev_lang) {
-                // Chèn một dòng trống khi chuyển khối ngôn ngữ
-                $parts[] = "\n"; // tạo khoảng cách rõ ràng giữa 2 khối
+                // Chèn một dòng trắng giữa hai khối ngôn ngữ khác nhau
+                $out = rtrim($out) . "\n\n";
+            } elseif ($out !== '') {
+                // Cùng khối, thêm khoảng trắng giữa các segment
+                $out .= ' ';
             }
-            $parts[] = trim($seg_text);
+            $out .= $seg_text;
             $prev_lang = $lang;
         }
-        $transcript_joined = trim(implode(" ", $parts));
         if ($found_vi && $found_en) {
-            // Đã phát hiện 2 ngôn ngữ -> dùng bản đã chèn xuống dòng giữa các khối
-            $transcript = $transcript_joined;
+            $transcript = trim($out);
         } else {
-            // Chỉ 1 ngôn ngữ -> dùng text gốc để giữ nguyên hành vi hiện tại
-            $transcript = (string) ($response_body['text'] ?? $transcript_joined);
+            // Chỉ 1 ngôn ngữ -> giữ nguyên text gốc để tránh thay đổi hành vi
+            $transcript = (string) ($response_body['text'] ?? trim($out));
         }
     } else {
         // Không có segments, fallback dùng text gốc
