@@ -651,10 +651,14 @@ function attc_upgrade_shortcode() {
 
         <div id="attc-success-notice" class="attc-notice is-hidden">
 <<<<<<< HEAD
+<<<<<<< HEAD
         <p style="font-size:28px"><strong>Nạp tiền thành công!</strong></p>
 =======
         <p><strong>Nạp tiền thành công!</strong></p>
 >>>>>>> 5fe830d (Done update hien thong bao sau khi nang cap nap tien)
+=======
+        <p style="font-size:28px"><strong>Nạp tiền thành công!</strong></p>
+>>>>>>> ab1d662 (Done luong nap tien that & trang nap cap hien thong bao nap thanh cong)
         <p id="attc-success-message"></p>
         <button id="attc-confirm-payment" class="attc-btn-primary">Quay lại chuyển đổi giọng nói</button>
     </div>
