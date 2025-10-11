@@ -613,6 +613,11 @@ function attc_get_price_per_minute() {
     return max(0, $price);
 }
 
+function attc_detect_lang_vi_en($text) {
+    if (!is_string($text) || $text === '') return 'en';
+    return preg_match('/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/iu', $text) ? 'vi' : 'en';
+}
+
 // ===== Upgrade Page Shortcode =====
 function attc_upgrade_shortcode() {
     if (!is_user_logged_in()) {
@@ -1467,7 +1472,8 @@ function attc_process_job($job_id) {
     $headers = ['Authorization: Bearer ' . $api_key];
     $post_fields = [
         'model' => 'whisper-1',
-        'language' => 'vi',
+        // Không ép ngôn ngữ để Whisper tự phát hiện đa ngôn ngữ
+        'response_format' => 'verbose_json',
         'temperature' => 0,
         'file' => curl_file_create($file_path, mime_content_type($file_path), basename($file_path))
     ];
@@ -1504,13 +1510,47 @@ function attc_process_job($job_id) {
         return;
     }
 
-    $transcript = $response_body['text'] ?? '';
+    // Hậu xử lý đa ngôn ngữ: nếu có segments thì tách khối theo thay đổi ngôn ngữ vi/en
+    $transcript = '';
+    $has_segments = isset($response_body['segments']) && is_array($response_body['segments']);
+    if ($has_segments) {
+        $parts = [];
+        $prev_lang = null;
+        $found_vi = false; $found_en = false;
+        foreach ($response_body['segments'] as $seg) {
+            $seg_text = is_array($seg) && isset($seg['text']) ? (string)$seg['text'] : '';
+            if ($seg_text === '') continue;
+            $lang = attc_detect_lang_vi_en($seg_text);
+            if ($lang === 'vi') { $found_vi = true; } else { $found_en = true; }
+            if ($prev_lang !== null && $lang !== $prev_lang) {
+                // Chèn một dòng trống khi chuyển khối ngôn ngữ
+                $parts[] = "\n"; // tạo khoảng cách rõ ràng giữa 2 khối
+            }
+            $parts[] = trim($seg_text);
+            $prev_lang = $lang;
+        }
+        $transcript_joined = trim(implode(" ", $parts));
+        if ($found_vi && $found_en) {
+            // Đã phát hiện 2 ngôn ngữ -> dùng bản đã chèn xuống dòng giữa các khối
+            $transcript = $transcript_joined;
+        } else {
+            // Chỉ 1 ngôn ngữ -> dùng text gốc để giữ nguyên hành vi hiện tại
+            $transcript = (string) ($response_body['text'] ?? $transcript_joined);
+        }
+    } else {
+        // Không có segments, fallback dùng text gốc
+        $transcript = (string) ($response_body['text'] ?? '');
+    }
 
-    // Hậu xử lý: chuẩn hoá chính tả tiếng Việt bằng OpenAI Chat (tuỳ chọn, an toàn lỗi)
+    // Hậu xử lý: chỉ hiệu chỉnh chính tả tiếng Việt khi văn bản thuần Việt
     if (!empty($transcript)) {
-        $corrected = attc_vi_correct_text($transcript, $api_key);
-        if (is_string($corrected) && $corrected !== '') {
-            $transcript = $corrected;
+        $contains_vi = (bool) preg_match('/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/iu', $transcript);
+        $contains_en = (bool) preg_match('/[A-Za-z]/', $transcript);
+        if ($contains_vi && !$contains_en) {
+            $corrected = attc_vi_correct_text($transcript, $api_key);
+            if (is_string($corrected) && $corrected !== '') {
+                $transcript = $corrected;
+            }
         }
     }
 
