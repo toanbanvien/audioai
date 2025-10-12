@@ -88,6 +88,13 @@ function attc_vi_correct_text($text, $api_key) {
         'Authorization' => 'Bearer ' . $api_key,
         'Content-Type'  => 'application/json',
     ];
+    // Thêm Project ID cho API key dạng sk-proj- (nếu có cấu hình)
+    if (strpos($api_key, 'sk-proj-') === 0) {
+        $attc_proj = get_option('attc_openai_project_id');
+        if (!empty($attc_proj)) {
+            $headers['OpenAI-Project'] = $attc_proj;
+        }
+    }
     $payload = [
         'model' => 'gpt-3.5-turbo',
         'temperature' => 0,
@@ -618,6 +625,21 @@ function attc_detect_lang_vi_en($text) {
     return preg_match('/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/iu', $text) ? 'vi' : 'en';
 }
 
+function attc_split_sentences($text) {
+    if (!is_string($text) || $text === '') return [];
+    // Tách theo các dấu câu phổ biến. Giữ lại dấu câu bằng lookbehind.
+    $parts = preg_split('/(?<=[\.\!\?…])\s+/u', trim($text));
+    if (!is_array($parts)) return [$text];
+    // Gom các mảnh nhỏ bất thường
+    $out = [];
+    foreach ($parts as $p) {
+        $p = trim($p);
+        if ($p === '') continue;
+        $out[] = $p;
+    }
+    return $out;
+}
+
 // ===== Upgrade Page Shortcode =====
 function attc_upgrade_shortcode() {
     if (!is_user_logged_in()) {
@@ -650,15 +672,7 @@ function attc_upgrade_shortcode() {
         </div>
 
         <div id="attc-success-notice" class="attc-notice is-hidden">
-<<<<<<< HEAD
-<<<<<<< HEAD
         <p style="font-size:28px"><strong>Nạp tiền thành công!</strong></p>
-=======
-        <p><strong>Nạp tiền thành công!</strong></p>
->>>>>>> 5fe830d (Done update hien thong bao sau khi nang cap nap tien)
-=======
-        <p style="font-size:28px"><strong>Nạp tiền thành công!</strong></p>
->>>>>>> ab1d662 (Done luong nap tien that & trang nap cap hien thong bao nap thanh cong)
         <p id="attc-success-message"></p>
         <button id="attc-confirm-payment" class="attc-btn-primary">Quay lại chuyển đổi giọng nói</button>
     </div>
@@ -1467,7 +1481,7 @@ function attc_process_job($job_id) {
         return;
     }
 
-    $api_key = get_option('attc_openai_api_key');
+    $api_key = trim((string) get_option('attc_openai_api_key'));
     if (empty($api_key)) {
         $job['status'] = 'failed';
         $job['error'] = 'Thiếu OpenAI API Key.';
@@ -1478,9 +1492,19 @@ function attc_process_job($job_id) {
 
     $api_url = 'https://api.openai.com/v1/audio/transcriptions';
     $headers = ['Authorization: Bearer ' . $api_key];
+    // Thêm Project ID cho API key dạng sk-proj- (nếu có cấu hình)
+    if (strpos($api_key, 'sk-proj-') === 0) {
+        $attc_proj = trim((string) get_option('attc_openai_project_id'));
+        if (!empty($attc_proj)) {
+            $headers[] = 'OpenAI-Project: ' . $attc_proj;
+        } else {
+            error_log(sprintf("[%s] Job %s: Warning. Using sk-proj key but missing Project ID setting.\n", date('Y-m-d H:i:s'), $job_id), 3, WP_CONTENT_DIR . '/attc_debug.log');
+        }
+    }
     $post_fields = [
         'model' => 'whisper-1',
-        // Không ép ngôn ngữ để Whisper tự phát hiện đa ngôn ngữ
+        // Gợi ý cho model để nhận diện đa ngôn ngữ tốt hơn
+        'prompt' => 'This audio contains Vietnamese (xin chào) and English (hello).',
         'response_format' => 'verbose_json',
         'temperature' => 0,
         'file' => curl_file_create($file_path, mime_content_type($file_path), basename($file_path))
@@ -1518,23 +1542,20 @@ function attc_process_job($job_id) {
         return;
     }
 
-    // Hậu xử lý đa ngôn ngữ: nếu có segments thì tách khối theo thay đổi ngôn ngữ vi/en
+    // Hậu xử lý đa ngôn ngữ: ưu tiên dùng segments (verbose_json). Fallback: tách câu.
     $transcript = '';
     $has_segments = isset($response_body['segments']) && is_array($response_body['segments']);
     if ($has_segments) {
         $out = '';
-        $prev_lang = null;
-        $found_vi = false; $found_en = false;
+        $prev_lang = null; $found_vi = false; $found_en = false;
         foreach ($response_body['segments'] as $seg) {
             $seg_text = is_array($seg) && isset($seg['text']) ? trim((string)$seg['text']) : '';
             if ($seg_text === '') continue;
             $lang = attc_detect_lang_vi_en($seg_text);
             if ($lang === 'vi') { $found_vi = true; } else { $found_en = true; }
             if ($prev_lang !== null && $lang !== $prev_lang) {
-                // Chèn một dòng trắng giữa hai khối ngôn ngữ khác nhau
                 $out = rtrim($out) . "\n\n";
             } elseif ($out !== '') {
-                // Cùng khối, thêm khoảng trắng giữa các segment
                 $out .= ' ';
             }
             $out .= $seg_text;
@@ -1543,12 +1564,32 @@ function attc_process_job($job_id) {
         if ($found_vi && $found_en) {
             $transcript = trim($out);
         } else {
-            // Chỉ 1 ngôn ngữ -> giữ nguyên text gốc để tránh thay đổi hành vi
             $transcript = (string) ($response_body['text'] ?? trim($out));
         }
     } else {
-        // Không có segments, fallback dùng text gốc
-        $transcript = (string) ($response_body['text'] ?? '');
+        // Fallback không có segments: xử lý theo câu
+        $raw_text = (string) ($response_body['text'] ?? '');
+        $transcript = $raw_text;
+        if ($raw_text !== '') {
+            $sentences = attc_split_sentences($raw_text);
+            if (!empty($sentences)) {
+                $prev_lang = null; $found_vi = false; $found_en = false; $out = '';
+                foreach ($sentences as $s) {
+                    $lang = attc_detect_lang_vi_en($s);
+                    if ($lang === 'vi') { $found_vi = true; } else { $found_en = true; }
+                    if ($prev_lang !== null && $lang !== $prev_lang) {
+                        $out = rtrim($out) . "\n\n";
+                    } elseif ($out !== '') {
+                        $out .= ' ';
+                    }
+                    $out .= trim($s);
+                    $prev_lang = $lang;
+                }
+                if ($found_vi && $found_en) {
+                    $transcript = trim($out);
+                }
+            }
+        }
     }
 
     // Hậu xử lý: chỉ hiệu chỉnh chính tả tiếng Việt khi văn bản thuần Việt
@@ -2772,6 +2813,7 @@ function attc_settings_page_html() {
 function attc_settings_init() {
     // Payment Section
     register_setting('attc_settings', 'attc_openai_api_key');
+    register_setting('attc_settings', 'attc_openai_project_id');
     add_settings_section('attc_openai_section', 'Cài đặt OpenAI API', null, 'attc-settings');
     add_settings_field(
         'attc_openai_api_key',
@@ -2780,6 +2822,14 @@ function attc_settings_init() {
         'attc-settings',
         'attc_openai_section',
         ['name' => 'attc_openai_api_key', 'type' => 'password', 'desc' => 'Nhập API Key của bạn từ tài khoản OpenAI.']
+    );
+    add_settings_field(
+        'attc_openai_project_id',
+        'OpenAI Project ID',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_openai_section',
+        ['name' => 'attc_openai_project_id', 'type' => 'text', 'desc' => 'Bắt buộc nếu dùng API Key dạng sk-proj- (Project-based API key).']
     );
 
     // reCAPTCHA Section
