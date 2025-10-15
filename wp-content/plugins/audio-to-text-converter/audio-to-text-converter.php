@@ -1151,6 +1151,27 @@ function attc_handle_wallet_actions() {
         exit;
     }
 
+    // Save per-user daily free upload quota
+    if (!empty($_POST['attc_save_user_free_quota']) && check_admin_referer('attc_user_free_quota_action', 'attc_user_free_quota_nonce')) {
+        $identifier = sanitize_text_field($_POST['attc_user_identifier_quota'] ?? '');
+        $quota      = (int) ($_POST['attc_user_daily_free_quota'] ?? 1);
+        $quota      = max(0, min(20, $quota));
+
+        $user = false;
+        if (is_numeric($identifier)) $user = get_user_by('id', (int)$identifier);
+        elseif (is_email($identifier)) $user = get_user_by('email', $identifier);
+        else $user = get_user_by('login', $identifier);
+
+        if ($user) {
+            update_user_meta($user->ID, '_attc_daily_free_quota', $quota);
+            set_transient('attc_admin_notice', '<div class="notice notice-success is-dismissible"><p>Đã lưu quota miễn phí mỗi ngày = ' . (int)$quota . ' cho user #' . (int)$user->ID . '.</p></div>', 30);
+        } else {
+            set_transient('attc_admin_notice', '<div class="notice notice-error is-dismissible"><p>Không tìm thấy người dùng.</p></div>', 30);
+        }
+        wp_safe_redirect(add_query_arg('page', 'attc-wallet', remove_query_arg(['_wpnonce', 'attc_save_user_free_quota'])));
+        exit;
+    }
+
     // Handle manual debit
     if (!empty($_POST['attc_manual_debit']) && check_admin_referer('attc_manual_debit_action', 'attc_manual_debit_nonce')) {
         $user_identifier = sanitize_text_field($_POST['attc_user_identifier_debit'] ?? '');
@@ -1369,6 +1390,20 @@ function attc_render_wallet_dashboard() {
     echo '<tr><th scope="row"><label for="attc_summary_points">Số lượng ý</label></th><td><input name="attc_summary_points" id="attc_summary_points" type="number" min="3" max="20" value="' . (int)$cur_points . '"> <span class="description">Mặc định 5–10 ý, khuyến nghị 7</span></td></tr>';
     echo '</tbody></table>';
     submit_button('Lưu cấu hình tóm tắt');
+    echo '</form>';
+
+    // Per-user daily free upload quota form
+    echo '<h2>Quota miễn phí theo người dùng</h2>';
+    echo '<form method="post" style="margin-bottom:20px;">';
+    wp_nonce_field('attc_user_free_quota_action', 'attc_user_free_quota_nonce');
+    echo '<input type="hidden" name="attc_save_user_free_quota" value="1" />';
+    echo '<table class="form-table"><tbody>';
+    echo '<tr><th scope="row"><label for="attc_user_identifier_quota">User (ID / Email / Username)</label></th>';
+    echo '<td><input name="attc_user_identifier_quota" id="attc_user_identifier_quota" type="text" class="regular-text" required placeholder="ví dụ: 123 hoặc user@example.com"></td></tr>';
+    echo '<tr><th scope="row"><label for="attc_user_daily_free_quota">Số lượt upload miễn phí mỗi ngày</label></th>';
+    echo '<td><input name="attc_user_daily_free_quota" id="attc_user_daily_free_quota" type="number" min="0" max="20" step="1" value="1"> <span class="description">0 = không cho dùng thử; 1 = mặc định hiện tại</span></td></tr>';
+    echo '</tbody></table>';
+    submit_button('Lưu quota miễn phí');
     echo '</form>';
 
     echo '<h2>Nạp tiền thủ công</h2>';
@@ -1599,8 +1634,11 @@ function attc_handle_form_submission() {
                 $today = current_time('Y-m-d');
                 $last_free_upload_date = get_user_meta($user_id, '_attc_last_free_upload_date', true);
                 $free_uploads_today = ($last_free_upload_date === $today) ? (int)get_user_meta($user_id, '_attc_free_uploads_today', true) : 0;
+                // Per-user quota (default 1 if not set)
+                $daily_free_quota = (int) get_user_meta($user_id, '_attc_daily_free_quota', true);
+                if ($daily_free_quota <= 0) { $daily_free_quota = 1; }
 
-                if ($free_uploads_today >= 1) {
+                if ($free_uploads_today >= $daily_free_quota) {
                     set_transient('attc_form_error', 'Bạn đã hết lượt tải lên miễn phí hôm nay. Vui lòng chọn "Nâng cấp" để chuyển đổi.', 30);
                     delete_transient($lock_key);
                     attc_redirect_back();
@@ -2180,6 +2218,8 @@ function attc_form_shortcode() {
     $balance = attc_get_wallet_balance($user_id);
     $price_per_minute = attc_get_price_per_minute();
     $max_minutes = $price_per_minute > 0 ? floor($balance / $price_per_minute) : 0;
+    // Ngưỡng miễn phí giống backend
+    $free_threshold = (int) get_option('attc_free_threshold', 500);
 
     $error_message = get_transient('attc_form_error');
     if ($error_message) delete_transient('attc_form_error');
@@ -2267,7 +2307,10 @@ function attc_form_shortcode() {
     $has_made_deposit = attc_user_has_made_deposit($user_id);
     $today = current_time('Y-m-d');
     $last_free_upload_date = get_user_meta($user_id, '_attc_last_free_upload_date', true);
-    $free_uploads_left = max(0, 1 - (int)get_user_meta($user_id, '_attc_free_uploads_today', true));
+    $free_uploads_today = ($last_free_upload_date === $today) ? (int) get_user_meta($user_id, '_attc_free_uploads_today', true) : 0;
+    $daily_free_quota = (int) get_user_meta($user_id, '_attc_daily_free_quota', true);
+    if ($daily_free_quota <= 0) { $daily_free_quota = 1; }
+    $free_uploads_left = max(0, $daily_free_quota - $free_uploads_today);
     $display_name = wp_get_current_user()->display_name;
     ?>
     <div class="attc-converter-wrap">
