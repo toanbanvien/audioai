@@ -411,6 +411,35 @@ function attc_handle_download_summary() {
 }
 add_action('init', 'attc_handle_download_summary');
 
+// CSS tùy chỉnh cho sticky footer (Flexbox - Target cho theme cụ thể)
+function attc_sticky_footer_styles() {
+    echo <<<CSS
+<style>
+    html, body { height: 100% !important; }
+    /* Fallback: body as flex container */
+    body {
+        display: flex !important;
+        flex-direction: column !important;
+        min-height: 100vh !important;
+        margin: 0 !important;
+    }
+    /* Primary: make site root act as flex container */
+    #page, .site {
+        display: flex !important;
+        flex-direction: column !important;
+        min-height: 100vh !important;
+        width: 100% !important;
+    }
+    /* Content area grows */
+    .site-wrapper { flex: 1 0 auto !important; min-height: 0 !important; }
+    /* Footer sticks to bottom */
+    #colophon { margin-top: auto !important; flex-shrink: 0 !important; position: static !important; }
+</style>
+CSS;
+}
+// Inject late to override theme styles
+add_action('wp_footer', 'attc_sticky_footer_styles', 999);
+
 // Nạp các thành phần của plugin
 require_once(plugin_dir_path(__FILE__) . 'history-shortcode.php');
 
@@ -2097,7 +2126,7 @@ function attc_form_shortcode() {
     ob_start();
     ?>
     <style>
-        .attc-converter-wrap { max-width: 700px; margin: 2rem auto; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif; }
+        .attc-converter-wrap { max-width: 900px; margin: 2rem auto; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif; }
         .attc-wallet-box { background: #d6e4fd; border-radius: 8px; padding: 1.5rem; display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem; }
         .attc-wallet-balance p { margin: 0; font-size: 1.1rem; } .attc-wallet-balance p strong { font-size: 1.5rem; color: #2c3e50; }
         .attc-wallet-sub { color: #5a6e82; font-size: 0.9rem; }
