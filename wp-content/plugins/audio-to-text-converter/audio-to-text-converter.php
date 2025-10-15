@@ -1570,6 +1570,15 @@ function attc_handle_form_submission() {
             require_once(ABSPATH . 'wp-admin/includes/media.php');
             $metadata = wp_read_audio_metadata($file['tmp_name']);
             $duration = !empty($metadata['length']) ? (int) $metadata['length'] : 0;
+            $trim_start = isset($_POST['trim_start']) ? max(0, (int) $_POST['trim_start']) : 0;
+            $trim_end = isset($_POST['trim_end']) ? max(0, (int) $_POST['trim_end']) : 0;
+            if ($duration > 0) {
+                $trim_start = min($trim_start, $duration);
+                $trim_end = ($trim_end > 0) ? min($trim_end, $duration) : $duration;
+                if ($trim_end < $trim_start) { $trim_end = $trim_start; }
+            }
+            $segment_duration = max(0, $trim_end - $trim_start);
+            if ($segment_duration === 0 && $duration > 0) { $segment_duration = $duration; $trim_start = 0; $trim_end = $duration; }
 
             if ($duration <= 0) {
                 set_transient('attc_form_error', 'Không thể xác định thầm lượng file hoặc file không hợp lệ.', 30);
@@ -1598,7 +1607,7 @@ function attc_handle_form_submission() {
                 }
                 $limit_in_minutes = (int) get_option('attc_daily_free_limit_minutes', 5);
                 $daily_free_limit_seconds = $limit_in_minutes * 60;
-                if ($duration > $daily_free_limit_seconds) {
+                if ($segment_duration > $daily_free_limit_seconds) {
                     $error_message = sprintf('File của bạn vượt quá %d phút. Lượt dùng thử chỉ áp dụng cho file dướithan %d phút.', $limit_in_minutes, $limit_in_minutes);
                     set_transient('attc_form_error', $error_message, 30);
                     delete_transient($lock_key);
@@ -1613,7 +1622,7 @@ function attc_handle_form_submission() {
 
             } else {
                 // === LUỒNG TRẢ PHÍ (CHỈ TRỪ TIỀN KHI THÀNH CÔNG) ===
-                $minutes_ceil = ceil($duration / 60);
+                $minutes_ceil = ceil($segment_duration / 60);
                 $cost = $minutes_ceil * $price_per_minute;
 
                 if ($balance < $cost) {
@@ -1643,6 +1652,9 @@ function attc_handle_form_submission() {
                 'file_path' => $dest_path,
                 'file_name' => basename($dest_path),
                 'duration' => $duration,
+                'trim_start' => (int) $trim_start,
+                'trim_end' => (int) $trim_end,
+                'segment_duration' => (int) $segment_duration,
                 'is_free' => (bool) $is_free_tier_eligible,
                 'cost' => (int) $cost,
                 'status' => 'queued',
@@ -2238,6 +2250,23 @@ function attc_form_shortcode() {
                 <label for="audio_file" class="file-input-label">Chọn từ máy tính</label>
                 <input type="file" id="audio_file" name="audio_file" accept="audio/*">
                 <div id="attc-file-info"></div>
+                <div id="attc-estimate" style="margin-top:8px; font-weight:600; color:#0f172a;"></div>
+            </div>
+            <div id="attc-trim-controls" class="is-hidden" style="margin-top:12px; text-align:left;">
+                <label style="display:block; margin-bottom:6px; font-weight:600;">Chọn đoạn chuyển đổi (phút:giây):</label>
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <label>Bắt đầu (phút:giây)
+                        <input type="text" id="attc-trim-start-mmss" value="0:00" placeholder="0:00" style="width:90px; margin-left:6px;">
+                        <input type="hidden" id="attc-trim-start" name="trim_start" value="0">
+                    </label>
+                    <label>Kết thúc (phút:giây)
+                        <input type="text" id="attc-trim-end-mmss" value="0:00" placeholder="4:30" style="width:90px; margin-left:6px;">
+                        <input type="hidden" id="attc-trim-end" name="trim_end" value="0">
+                    </label>
+                    <span id="attc-trim-length" style="font-style:italic; color:#475569;">Độ dài: 0:00</span>
+                </div>
+                <audio id="attc-audio-preview" controls style="margin-top:8px; width:100%; display:none;"></audio>
+                <div id="attc-trim-warning" class="attc-alert attc-error is-hidden" style="margin-top:8px;"></div>
             </div>
             <button type="submit" class="attc-submit-btn" id="attc-submit-button" disabled>Chuyển đổi</button>
             <div id="attc-progress" class="attc-progress is-hidden" aria-live="polite">
@@ -2306,6 +2335,97 @@ function attc_form_shortcode() {
         // Dùng để tránh mở hộp thoại chọn file 2 lần liền nhau
         let lastFileDialogAt = 0;
 
+        // Estimate + Trim controls
+        const estimateEl = document.getElementById('attc-estimate');
+        const trimWrap = document.getElementById('attc-trim-controls');
+        const trimStartHidden = document.getElementById('attc-trim-start');
+        const trimEndHidden = document.getElementById('attc-trim-end');
+        const trimStartMMSS = document.getElementById('attc-trim-start-mmss');
+        const trimEndMMSS = document.getElementById('attc-trim-end-mmss');
+        const trimLen = document.getElementById('attc-trim-length');
+        const trimWarn = document.getElementById('attc-trim-warning');
+        const audioPreview = document.getElementById('attc-audio-preview');
+        const pricePerMinute = <?php echo (int) $price_per_minute; ?>;
+        const walletBalance = <?php echo (int) $balance; ?>;
+        const freeLimitMinutes = <?php echo (int) get_option('attc_daily_free_limit_minutes', 5); ?>;
+        let fileDuration = 0; // seconds
+
+        function updateEstimate(seconds) {
+            try {
+                const secs = Math.max(0, Number.isFinite(seconds) ? seconds : fileDuration);
+                if (!estimateEl) return;
+                if (!secs) { estimateEl.textContent = ''; return; }
+                const mins = secs / 60;
+                const cost = Math.ceil(mins * pricePerMinute);
+                estimateEl.textContent = `Ước tính: ${mins.toFixed(2)} phút ≈ ${cost.toLocaleString('vi-VN')}đ`;
+            } catch(e) {}
+        }
+
+        function toSeconds(txt) {
+            if (typeof txt !== 'string') return 0;
+            const parts = txt.trim().split(':').map(x=>x.trim());
+            if (parts.length === 1) { // seconds only
+                const s = parseInt(parts[0],10); return isFinite(s) && s>=0 ? s : 0;
+            }
+            if (parts.length === 2) { // m:s
+                const m = parseInt(parts[0],10); const s = parseInt(parts[1],10);
+                if (!isFinite(m) || !isFinite(s) || m<0 || s<0 || s>59) return 0;
+                return m*60+s;
+            }
+            // h:m:s
+            const h = parseInt(parts[0],10); const m = parseInt(parts[1],10); const s = parseInt(parts[2],10);
+            if (!isFinite(h) || !isFinite(m) || !isFinite(s) || h<0 || m<0 || m>59 || s<0 || s>59) return 0;
+            return h*3600 + m*60 + s;
+        }
+        function toMMSS(secs) {
+            secs = Math.max(0, Math.floor(secs||0));
+            const h = Math.floor(secs/3600);
+            const m = Math.floor((secs%3600)/60);
+            const s = secs%60;
+            return (h>0 ? (h+':'+String(m).padStart(2,'0')) : String(m)) + ':' + String(s).padStart(2,'0');
+        }
+
+        function applyTrimConstraints() {
+            if (!trimWrap) return;
+            let s = toSeconds(trimStartMMSS ? trimStartMMSS.value : '0:00');
+            let e = toSeconds(trimEndMMSS ? trimEndMMSS.value : '0:00');
+            // Always clamp non-negative
+            s = Math.max(0, s);
+            e = Math.max(0, e);
+            // If end exceeds duration, cap to duration
+            if (fileDuration > 0 && e > fileDuration) e = fileDuration;
+            // If start exceeds duration OR start > end, reset start to 0:00 (as requested)
+            if ((fileDuration > 0 && s > fileDuration) || (e > 0 && s > e)) {
+                s = 0;
+            }
+            // Ensure end >= start after potential reset
+            if (e < s) e = s;
+            if (trimStartHidden) trimStartHidden.value = Math.floor(s);
+            if (trimEndHidden) trimEndHidden.value = Math.floor(e);
+            if (trimStartMMSS) trimStartMMSS.value = toMMSS(s);
+            if (trimEndMMSS) trimEndMMSS.value = toMMSS(e);
+            const selected = Math.max(0, e - s);
+            if (trimLen) trimLen.textContent = `Độ dài: ${toMMSS(selected)}`;
+
+            // Enforce free limit when balance is zero
+            let overLimit = false;
+            if (walletBalance <= 0) {
+                const freeSecs = Math.max(0, freeLimitMinutes * 60);
+                if (selected > freeSecs) overLimit = true;
+            }
+            if (overLimit) {
+                if (trimWarn) {
+                    trimWarn.classList.remove('is-hidden');
+                    trimWarn.textContent = `Tài khoản miễn phí: vui lòng chọn đoạn <= ${freeLimitMinutes} phút để xem trước.`;
+                }
+                submitButton.disabled = true;
+            } else {
+                if (trimWarn) trimWarn.classList.add('is-hidden');
+                submitButton.disabled = false;
+            }
+            updateEstimate(selected || fileDuration);
+        }
+
         // Hàm tiện ích: cuộn về tiêu đề trang (ưu tiên .entry-title, sau đó .entry-header, cuối cùng top window)
         function attcScrollToTitle() {
             const el = document.querySelector('.entry-title') || document.querySelector('.entry-header');
@@ -2345,9 +2465,41 @@ function attc_form_shortcode() {
                 submitButton.disabled = true;
             }
         }
+        function loadAudioForAnalysis(file){
+            try {
+                if (!file || !audioPreview) return;
+                const url = URL.createObjectURL(file);
+                audioPreview.src = url;
+                audioPreview.style.display = 'block';
+                // Show trim block immediately while waiting for metadata
+                if (trimWrap) trimWrap.classList.remove('is-hidden');
+                if (estimateEl) estimateEl.textContent = 'Đang đọc thời lượng file...';
+                if (trimEndMMSS && (!fileDuration || fileDuration === 0)) {
+                    // Default end = free limit (if wallet is zero) else 120s for preview
+                    const def = (walletBalance <= 0 ? Math.max(1, freeLimitMinutes) * 60 : 120);
+                    trimEndMMSS.value = toMMSS(def);
+                    if (trimEndHidden) trimEndHidden.value = def;
+                }
+                audioPreview.addEventListener('loadedmetadata', function onMeta(){
+                    audioPreview.removeEventListener('loadedmetadata', onMeta);
+                    fileDuration = Math.floor(audioPreview.duration || 0);
+                    if (trimWrap) trimWrap.classList.remove('is-hidden');
+                    if (trimEndMMSS) trimEndMMSS.value = toMMSS(fileDuration || 0);
+                    if (trimEndHidden) trimEndHidden.value = Math.floor(fileDuration || 0);
+                    applyTrimConstraints();
+                });
+            } catch(e) {
+                // fallback: hide preview but still allow upload
+                if (audioPreview) { audioPreview.style.display = 'none'; }
+            }
+        }
+
         fileInput.addEventListener('change', function(){
             lastFileDialogAt = Date.now();
             updateFileUI();
+            if (fileInput.files && fileInput.files[0]) {
+                loadAudioForAnalysis(fileInput.files[0]);
+            }
         });
         // Khởi tạo trạng thái nút submit theo file hiện có (nếu có)
         updateFileUI();
@@ -2611,13 +2763,33 @@ function attc_form_shortcode() {
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
             dropZone.addEventListener(eventName, preventDefaults, false);
         });
+        // Toggle visual state on drag
+        ['dragenter','dragover'].forEach(evt => dropZone.addEventListener(evt, ()=>{ dropZone.classList.add('is-dragover'); }));
+        ['dragleave','drop'].forEach(evt => dropZone.addEventListener(evt, ()=>{ dropZone.classList.remove('is-dragover'); }));
+        // Handle actual drop to select file
+        dropZone.addEventListener('drop', handleDrop, false);
         // Áp dụng trên toàn trang để tránh trình duyệt mở file khi thả ra ngoài dropzone
         ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
             document.body.addEventListener(eventName, preventDefaults, false);
         });
+        ['input','change','blur'].forEach(evt=>{
+            if (trimStartMMSS) trimStartMMSS.addEventListener(evt, applyTrimConstraints);
+            if (trimEndMMSS) trimEndMMSS.addEventListener(evt, applyTrimConstraints);
+        });
 
-        dropZone.addEventListener('drop', handleDrop, false);
-        fileInput.addEventListener('change', handleFileSelect, false);
+        // Prevent submit if invalid (NaN or empty)
+        uploadForm.addEventListener('submit', function(e){
+            const s = toSeconds(trimStartMMSS ? trimStartMMSS.value : '0:00');
+            const t = toSeconds(trimEndMMSS ? trimEndMMSS.value : '0:00');
+            if (!isFinite(s) || !isFinite(t) || t < s || (fileDuration>0 && (s>fileDuration || t>fileDuration))) {
+                e.preventDefault();
+                if (trimWarn) {
+                    trimWarn.classList.remove('is-hidden');
+                    trimWarn.textContent = 'Vui lòng nhập thời gian hợp lệ trong phạm vi của audio.';
+                }
+                return false;
+            }
+        });
 
         function preventDefaults(e) {
             e.preventDefault();
@@ -2640,6 +2812,8 @@ function attc_form_shortcode() {
                 const file = files[0];
                 fileInfo.textContent = 'File đã chọn: ' + file.name + ' (' + (file.size / 1024 / 1024).toFixed(2) + ' MB)';
                 submitButton.disabled = false;
+                // Phân tích audio để hiện preview, trim và ước tính
+                loadAudioForAnalysis(file);
             }
         }
 
