@@ -68,7 +68,8 @@ function attc_history_shortcode() {
                         <th width="15%">Ngày</th>
                         <th width="15%">Loại</th>
                         <th width="15%">Số tiền</th>
-                        <th width="40%">Chi tiết</th>
+                        <th width="30%">Chi tiết</th>
+                        <th width="25%">Tóm tắt điểm chính</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -137,6 +138,24 @@ function attc_history_shortcode() {
                                 }
                             ?>
                         </td>
+                        <td>
+                            <?php 
+                                $meta = $item['meta'] ?? [];
+                                $summary = $meta['summary'] ?? '';
+                                if (!empty($summary)) {
+                                    $download_nonce = wp_create_nonce('attc_download_' . $item['timestamp']);
+                                    $download_url = add_query_arg([
+                                        'action' => 'attc_download_summary',
+                                        'timestamp' => $item['timestamp'],
+                                        'nonce' => $download_nonce,
+                                    ], home_url());
+                                    echo '<a href="' . esc_url($download_url) . '" class="attc-download-link">Tải tóm tắt (.docx)</a>';
+                                    echo '<div class="attc-transcript-content">' . nl2br(esc_html($summary)) . '</div>';
+                                } else {
+                                    echo '<em>Chưa có tóm tắt.</em>';
+                                }
+                            ?>
+                        </td>
                     </tr>
                     <?php endforeach; ?>
                 </tbody>
@@ -152,7 +171,8 @@ add_shortcode('attc_history', 'attc_history_shortcode');
 function attc_inject_history_shortcode($content) {
     if (is_page('lich-su-chuyen-doi') && in_the_loop() && is_main_query()) {
         if (stripos($content, '[attc_history]') === false) {
-            return '[attc_history]';
+            // Ensure the shortcode is added if not present
+            $content = '[attc_history]' . $content;
         }
     }
     return $content;
