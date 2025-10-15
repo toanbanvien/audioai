@@ -1666,6 +1666,9 @@ function attc_handle_form_submission() {
             if (!wp_next_scheduled('attc_run_job', [$job_id])) {
                 wp_schedule_single_event(time() + 1, 'attc_run_job', [$job_id]);
                 set_transient('attc_last_job_' . $user_id, $job_id, HOUR_IN_SECONDS);
+                // Nudge WP-Cron to run soon (Laragon/local có thể không auto-hit wp-cron)
+                $cron_url = site_url('wp-cron.php');
+                @wp_remote_post($cron_url, ['timeout' => 0.01, 'blocking' => false]);
             }
 
             // Lưu job_id gần nhất vào user meta để client có thể polling (ổn định hơn transient)
@@ -1836,6 +1839,8 @@ function attc_process_job($job_id) {
 
     $user_id = (int) ($job['user_id'] ?? 0);
     $file_path = (string) ($job['file_path'] ?? '');
+    $trim_start = (int) ($job['trim_start'] ?? 0);
+    $segment_duration = (int) ($job['segment_duration'] ?? 0);
     $is_free = !empty($job['is_free']);
     $cost = (int) ($job['cost'] ?? 0);
 
@@ -1844,7 +1849,6 @@ function attc_process_job($job_id) {
         $job['error'] = 'File không tồn tại.';
         error_log(sprintf("[%s] Job %s: Failed. Reason: File not found at %s\n", date('Y-m-d H:i:s'), $job_id, $file_path), 3, WP_CONTENT_DIR . '/attc_webhook.log');
         update_option('attc_job_' . $job_id, $job);
-        if ($user_id > 0) { delete_user_meta($user_id, 'attc_last_job'); }
         return;
     }
 
@@ -1854,58 +1858,118 @@ function attc_process_job($job_id) {
         $job['error'] = 'Thiếu OpenAI API Key.';
         error_log(sprintf("[%s] Job %s: Failed. Reason: Missing OpenAI API Key.\n", date('Y-m-d H:i:s'), $job_id), 3, WP_CONTENT_DIR . '/attc_webhook.log');
         update_option('attc_job_' . $job_id, $job);
-        if ($user_id > 0) { delete_user_meta($user_id, 'attc_last_job'); }
         return;
     }
 
-    $api_url = 'https://api.openai.com/v1/audio/transcriptions';
-    $headers = ['Authorization: Bearer ' . $api_key];
-    // Thêm Project ID cho API key dạng sk-proj- (nếu có cấu hình)
-    if (strpos($api_key, 'sk-proj-') === 0) {
-        $attc_proj = trim((string) get_option('attc_openai_project_id'));
-        if (!empty($attc_proj)) {
-            $headers['OpenAI-Project'] = $attc_proj;
-        } else {
-            error_log(sprintf("[%s] Job %s: Warning. Using sk-proj key but missing Project ID setting.\n", date('Y-m-d H:i:s'), $job_id), 3, WP_CONTENT_DIR . '/attc_webhook.log');
+    $send_path = $file_path;
+    $tmp_trim = '';
+    if (file_exists($file_path) && $segment_duration > 0) {
+        $orig_duration = (int) ($job['duration'] ?? 0);
+        if ($orig_duration <= 0 || $segment_duration <= $orig_duration) {
+            $upload_dir = wp_upload_dir();
+            $tmp_dir = trailingslashit($upload_dir['basedir']) . 'attc_jobs';
+            if (!file_exists($tmp_dir)) { wp_mkdir_p($tmp_dir); }
+            $ss = max(0, (int) $trim_start);
+            $tt = max(0, (int) $segment_duration);
+            $ffmpeg_bin = trim((string) get_option('attc_ffmpeg_path', 'ffmpeg'));
+            $shell_enabled = function_exists('shell_exec');
+            $disabled_funcs = (string) ini_get('disable_functions');
+            $env_path = (string) getenv('PATH');
+            error_log(sprintf('[%s] Job %s: shell_exec=%s, disable_functions="%s", PATH="%s", ffmpeg_bin="%s"\n', date('Y-m-d H:i:s'), $job_id, $shell_enabled ? 'yes' : 'no', $disabled_funcs, $env_path, $ffmpeg_bin), 3, WP_CONTENT_DIR . '/attc_debug.log');
+            if ($shell_enabled) {
+                $ver_out = @shell_exec($ffmpeg_bin . ' -version 2>&1');
+                error_log(sprintf('[%s] Job %s: ffmpeg -version output: %s\n', date('Y-m-d H:i:s'), $job_id, (string)$ver_out), 3, WP_CONTENT_DIR . '/attc_debug.log');
+            }
+            $tmp_trim = trailingslashit($tmp_dir) . $job_id . '-trimmed-opus.webm';
+            $cmd = $ffmpeg_bin . ' -y -ss ' . escapeshellarg((string)$ss) . ' -t ' . escapeshellarg((string)$tt) . ' -i ' . escapeshellarg($file_path) . ' -vn -map a:0 -ac 1 -ar 16000 -c:a libopus -b:a 16k -vbr on -compression_level 10 -application voip ' . escapeshellarg($tmp_trim) . ' 2>&1';
+            $t_ffmpeg_start = microtime(true);
+            $out = $shell_enabled ? @shell_exec($cmd) : '';
+            $t_ffmpeg_end = microtime(true);
+            $ffmpeg_secs = number_format($t_ffmpeg_end - $t_ffmpeg_start, 3);
+            $out_size = (file_exists($tmp_trim) ? filesize($tmp_trim) : 0);
+            error_log(sprintf('[%s] Job %s: ffmpeg trim+opus (%.3fs, %d bytes) cmd: %s\nOutput: %s\n', date('Y-m-d H:i:s'), $job_id, $ffmpeg_secs, $out_size, $cmd, (string)$out), 3, WP_CONTENT_DIR . '/attc_debug.log');
+            if (file_exists($tmp_trim) && filesize($tmp_trim) > 0) {
+                $send_path = $tmp_trim;
+            } else {
+                $tmp_trim = trailingslashit($tmp_dir) . $job_id . '-trimmed-' . basename($file_path);
+                $cmd_fallback = $ffmpeg_bin . ' -y -ss ' . escapeshellarg((string)$ss) . ' -t ' . escapeshellarg((string)$tt) . ' -i ' . escapeshellarg($file_path) . ' -c copy ' . escapeshellarg($tmp_trim) . ' 2>&1';
+                $out_fb = $shell_enabled ? @shell_exec($cmd_fallback) : '';
+                error_log(sprintf('[%s] Job %s: ffmpeg trim fallback copy cmd: %s\nOutput: %s\n', date('Y-m-d H:i:s'), $job_id, $cmd_fallback, (string)$out_fb), 3, WP_CONTENT_DIR . '/attc_debug.log');
+                if (file_exists($tmp_trim) && filesize($tmp_trim) > 0) {
+                    $send_path = $tmp_trim;
+                } else {
+                    $tmp_trim = trailingslashit($tmp_dir) . $job_id . '-trimmed-encoded-' . basename($file_path);
+                    $cmd2 = $ffmpeg_bin . ' -y -ss ' . escapeshellarg((string)$ss) . ' -t ' . escapeshellarg((string)$tt) . ' -i ' . escapeshellarg($file_path) . ' -c:a aac -b:a 192k -vn ' . escapeshellarg($tmp_trim) . ' 2>&1';
+                    $out2 = $shell_enabled ? @shell_exec($cmd2) : '';
+                    error_log(sprintf('[%s] Job %s: ffmpeg trim fallback aac cmd: %s\nOutput: %s\n', date('Y-m-d H:i:s'), $job_id, $cmd2, (string)$out2), 3, WP_CONTENT_DIR . '/attc_debug.log');
+                    if (file_exists($tmp_trim) && filesize($tmp_trim) > 0) {
+                        $send_path = $tmp_trim;
+                    } else {
+                        $job['status'] = 'failed';
+                        $job['error'] = $shell_enabled ? 'Không thể cắt đoạn audio với ffmpeg.' : 'Máy chủ không cho phép shell_exec. Không thể chạy ffmpeg.';
+                        update_option('attc_job_' . $job_id, $job);
+                        return;
+                    }
+                }
+            }
         }
     }
+
+    $api_url = 'https://api.openai.com/v1/audio/transcriptions';
+    $headers_in = ['Authorization: Bearer ' . $api_key];
+    if (strpos($api_key, 'sk-proj-') === 0) {
+        $attc_proj = trim((string) get_option('attc_openai_project_id'));
+        if (!empty($attc_proj)) { $headers_in[] = 'OpenAI-Project: ' . $attc_proj; }
+    }
+    $headers_in[] = 'Expect:';
+    $headers_in[] = 'Connection: keep-alive';
     $post_fields = [
         'model' => 'whisper-1',
         // Không đặt 'language' để Whisper tự nhận diện và xử lý đa ngôn ngữ
         'response_format' => 'verbose_json',
         'temperature' => 0,
-        'file' => curl_file_create($file_path, mime_content_type($file_path), basename($file_path))
+        'file' => curl_file_create($send_path, mime_content_type($send_path), basename($send_path))
     ];
 
-    error_log(sprintf("[%s] Job %s: Preparing to call OpenAI API at %s\n", date('Y-m-d H:i:s'), $job_id, $api_url), 3, WP_CONTENT_DIR . '/attc_debug.log');
+    error_log(sprintf("[%s] Job %s: Preparing to call OpenAI API at %s (file: %s, size: %d bytes)\n", date('Y-m-d H:i:s'), $job_id, $api_url, basename($send_path), (file_exists($send_path)?filesize($send_path):0)), 3, WP_CONTENT_DIR . '/attc_debug.log');
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $api_url);
     curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers_in);
+    if (defined('CURL_HTTP_VERSION_2TLS')) { curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS); }
+    if (defined('CURLOPT_TCP_KEEPALIVE')) { curl_setopt($ch, CURLOPT_TCP_KEEPALIVE, 1); }
     curl_setopt($ch, CURLOPT_POSTFIELDS, $post_fields);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
     curl_setopt($ch, CURLOPT_TIMEOUT, 600);
 
+    $t_curl_start = microtime(true);
     $response_body_str = curl_exec($ch);
+    $t_curl_end = microtime(true);
+    $curl_secs = number_format($t_curl_end - $t_curl_start, 3);
     $response_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curl_error = curl_error($ch);
     curl_close($ch);
-    error_log(sprintf("[%s] Job %s: cURL response. Code: %d. Body: %s. cURL Error: %s\n", date('Y-m-d H:i:s'), $job_id, $response_code, $response_body_str, $curl_error), 3, WP_CONTENT_DIR . '/attc_debug.log');
+    error_log(sprintf("[%s] Job %s: cURL response (%.3fs). Code: %d. Body: %s. cURL Error: %s\n", date('Y-m-d H:i:s'), $job_id, $curl_secs, $response_code, $response_body_str, $curl_error), 3, WP_CONTENT_DIR . '/attc_debug.log');
 
     if ($curl_error) {
         $job['status'] = 'failed';
         $job['error'] = 'cURL: ' . $curl_error;
         update_option('attc_job_' . $job_id, $job);
-        if ($user_id > 0) { delete_user_meta($user_id, 'attc_last_job'); }
+        // Clean up trimmed temp file
+        if (!empty($tmp_trim) && file_exists($tmp_trim)) { @unlink($tmp_trim); }
         return;
     }
 
     $response_body = json_decode($response_body_str, true);
+
+    // Clean up trimmed temp file when done
+    if (!empty($tmp_trim) && file_exists($tmp_trim)) { @unlink($tmp_trim); }
     if ($response_code !== 200) {
         $job['status'] = 'failed';
         $job['error'] = isset($response_body['error']['message']) ? $response_body['error']['message'] : 'OpenAI error.';
         update_option('attc_job_' . $job_id, $job);
-        if ($user_id > 0) { delete_user_meta($user_id, 'attc_last_job'); }
+        if (!empty($tmp_trim) && file_exists($tmp_trim)) { @unlink($tmp_trim); }
         return;
     }
 
@@ -2416,7 +2480,7 @@ function attc_form_shortcode() {
             if (overLimit) {
                 if (trimWarn) {
                     trimWarn.classList.remove('is-hidden');
-                    trimWarn.textContent = `Tài khoản miễn phí: vui lòng chọn đoạn <= ${freeLimitMinutes} phút để xem trước.`;
+                    trimWarn.textContent = `Tài khoản miễn phí: vui lòng chọn đoạn <= ${freeLimitMinutes} phút để chuyển đổi.`;
                 }
                 submitButton.disabled = true;
             } else {
