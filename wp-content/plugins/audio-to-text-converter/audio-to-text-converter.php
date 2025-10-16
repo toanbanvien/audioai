@@ -10,6 +10,40 @@ if (!defined('ABSPATH')) {
     exit; // Chặn truy cập trực tiếp
 }
 
+// Ghép các dòng rời rạc để tạo câu hoàn chỉnh (tránh tóm tắt lấy giữa câu)
+function attc_vi_fix_sentence_boundaries($text) {
+    if (!is_string($text) || trim($text) === '') return $text;
+    $lines = preg_split('/\r\n|\r|\n/u', $text);
+    if (!is_array($lines) || empty($lines)) return $text;
+    $joiners = '/^(và|với|cho|nhưng|rồi|thì|là|để|còn|mà|nên|hay|hoặc|tại vì|bởi vì|vì vậy|cũng|còn nữa|rằng)\b/iu';
+    $out = [];
+    foreach ($lines as $raw) {
+        $s = trim($raw);
+        if ($s === '') { $out[] = ''; continue; }
+        $prevIdx = count($out) - 1;
+        $prev = $prevIdx >= 0 ? $out[$prevIdx] : '';
+        $prevTrim = trim($prev);
+        $prevEndOK = $prevTrim !== '' && preg_match('/[\.\!\?]$/u', $prevTrim);
+        $shouldAttach = (!$prevEndOK) || preg_match($joiners, mb_strtolower($s, 'UTF-8'));
+        if ($prevIdx >= 0 && $shouldAttach) {
+            // Nối vào câu trước
+            $glue = ($prevTrim === '') ? '' : ' ';
+            $out[$prevIdx] = rtrim($prev) . $glue . ltrim($s);
+        } else {
+            $out[] = $s;
+        }
+    }
+    // Đảm bảo mỗi câu kết thúc dấu chấm nếu thiếu
+    foreach ($out as $i => $ln) {
+        $t = rtrim($ln);
+        if ($t !== '' && !preg_match('/[\.\!\?]$/u', $t)) {
+            $out[$i] = $t . '.';
+        }
+    }
+    return implode("\n", $out);
+}
+
+
 // Tóm tắt trích xuất miễn phí: trả về 5-10 ý chính dạng gạch đầu dòng, tránh trùng lặp ý
 function attc_summarize_points($text, $max_points = 7) {
     if (!is_string($text) || trim($text) === '') return '';
@@ -50,9 +84,28 @@ function attc_summarize_points($text, $max_points = 7) {
             $score += $freq[$w];
         }
         // Heuristic: phạt câu quá ngắn hoặc quá dài
-        $len = mb_strlen($s, 'UTF-8');
-        if ($len < 20) $score *= 0.6;
-        if ($len > 250) $score *= 0.8;
+        $word_count = count(preg_split('/\s+/u', trim($s)));
+        // Phạt nặng câu quá ngắn (dưới 5 từ)
+        if ($word_count < 5) {
+            $score *= 0.05; 
+        } else if ($word_count > 30) { // Phạt câu quá dài (hơn 30 từ)
+            $score *= 0.5;
+        } else if ($word_count > 20) { // Phạt nhẹ câu hơi dài (20-30 từ)
+            $score *= 0.8;
+        } else { // Thưởng cho câu có độ dài lý tưởng (5-20 từ)
+            $score *= 1.2;
+        }
+        // Ưu tiên câu bắt đầu rõ ràng (chữ hoa, chủ ngữ + vị ngữ), giảm điểm câu mở đầu bằng liên từ/tiểu từ
+        $starts = mb_strtolower(trim($s), 'UTF-8');
+        if (preg_match('/^(và|với|cho|nhưng|rồi|thì|là|để|còn|mà|nên|hay|hoặc|tại vì|bởi vì|vì vậy)\b/u', $starts)) {
+            $score *= 0.6;
+        }
+        $firstChar = mb_substr(trim($s), 0, 1, 'UTF-8');
+        if ($firstChar !== '' && preg_match('/[\p{Lu}Đ]/u', $firstChar)) {
+            $score *= 1.1;
+        }
+        // Nhẹ ưu tiên câu xuất hiện sớm (gần đầu đoạn)
+        $score *= (1.0 + max(0, 0.15 - min(0.15, $idx * 0.01)));
         $scored[] = ['i' => $idx, 's' => $s, 'score' => $score, 'set' => array_unique($words)];
     }
     if (empty($scored)) return '';
@@ -314,6 +367,195 @@ function attc_handle_download_transcript() {
     }
 }
 add_action('init', 'attc_handle_download_transcript');
+
+// Endpoint để tải file PDF (transcript)
+function attc_handle_download_transcript_pdf() {
+    if (isset($_GET['action'], $_GET['nonce'], $_GET['timestamp']) && $_GET['action'] === 'attc_download_transcript_pdf') {
+        if (!is_user_logged_in() || !wp_verify_nonce($_GET['nonce'], 'attc_download_' . $_GET['timestamp'])) {
+            wp_die('Invalid request');
+        }
+
+        $user_id = get_current_user_id();
+        $timestamp = (int)$_GET['timestamp'];
+        $history = get_user_meta($user_id, 'attc_wallet_history', true);
+
+        $transcript_content = '';
+        if (!empty($history)) {
+            foreach ($history as $item) {
+                if (($item['timestamp'] ?? 0) === $timestamp) {
+                    $transcript_content = $item['meta']['transcript'] ?? '';
+                    break;
+                }
+            }
+        }
+
+        if (empty($transcript_content)) {
+            wp_die('Không tìm thấy nội dung.');
+        }
+
+        // ====== Render PDF với GD + TrueType (UTF-8) ======
+        if (!function_exists('imagecreatetruecolor') || !function_exists('imagettftext')) {
+            wp_die('Máy chủ thiếu GD hoặc TTF để tạo PDF UTF-8.');
+        }
+
+        // Chọn font TTF có hỗ trợ tiếng Việt
+        $font_path = (string) get_option('attc_pdf_ttf_path', '');
+        $candidates = [];
+        if (!empty($font_path)) { $candidates[] = $font_path; }
+        // Windows phổ biến
+        $candidates[] = 'C:\\Windows\\Fonts\\arial.ttf';
+        $candidates[] = 'C:\\Windows\\Fonts\\times.ttf';
+        $candidates[] = 'C:\\Windows\\Fonts\\timesbd.ttf';
+        $candidates[] = 'C:\\Windows\\Fonts\\tahoma.ttf';
+        // Linux phổ biến
+        $candidates[] = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf';
+        $candidates[] = '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf';
+
+        $chosen_font = '';
+        foreach ($candidates as $p) { if ($p && file_exists($p)) { $chosen_font = $p; break; } }
+        if (empty($chosen_font)) {
+            wp_die('Không tìm thấy font TTF để tạo PDF UTF-8. Vui lòng cấu hình đường dẫn font tại attc_pdf_ttf_path (ví dụ C:\\Windows\\Fonts\\arial.ttf).');
+        }
+
+        // Chuẩn hoá và thêm dấu câu cơ bản
+        $normalized = preg_replace("/\r\n|\r/", "\n", $transcript_content);
+        $lines = explode("\n", $normalized);
+        $processed = [];
+        foreach ($lines as $ln) {
+            $t = trim($ln);
+            if ($t === '') { $processed[] = ''; continue; }
+            if (!preg_match('/[\.!?;:]$/u', $t)) { $t .= '.'; }
+            $processed[] = $t;
+        }
+        $text = implode("\n", $processed);
+
+        // Thông số trang (px)
+        $page_w = 1240; // ~A4 @150dpi
+        $page_h = 1754;
+        $margin = 80;
+        $font_size = 14; // giảm thêm 2px (~11pt)
+        $line_spacing = 32; // điều chỉnh khoảng cách dòng tương ứng
+        $max_w = $page_w - 2 * $margin;
+        $max_h = $page_h - 2 * $margin;
+
+        // Tách chữ thành dòng theo word-wrap
+        $paragraphs = explode("\n", $text);
+        $all_lines = [];
+        foreach ($paragraphs as $para) {
+            $para = trim($para);
+            if ($para === '') { $all_lines[] = ''; continue; }
+            $words = preg_split('/\s+/u', $para);
+            $cur = '';
+            foreach ($words as $w) {
+                $test = $cur === '' ? $w : ($cur . ' ' . $w);
+                $bbox = imagettfbbox($font_size, 0, $chosen_font, $test);
+                $width = abs($bbox[2] - $bbox[0]);
+                if ($width > $max_w && $cur !== '') {
+                    $all_lines[] = $cur;
+                    $cur = $w;
+                } else {
+                    $cur = $test;
+                }
+            }
+            if ($cur !== '') { $all_lines[] = $cur; }
+        }
+
+        // Render từng trang ra JPEG và gom vào PDF
+        $pages = [];
+        $y = $margin;
+        $im = imagecreatetruecolor($page_w, $page_h);
+        $white = imagecolorallocate($im, 255, 255, 255);
+        $black = imagecolorallocate($im, 15, 23, 42);
+        imagefilledrectangle($im, 0, 0, $page_w, $page_h, $white);
+
+        foreach ($all_lines as $ln) {
+            if ($ln === '') {
+                $y += $line_spacing; // dòng trống
+            } else {
+                $bbox = imagettfbbox($font_size, 0, $chosen_font, $ln);
+                $line_h = abs($bbox[1] - $bbox[7]);
+                $line_h = max($line_h, $line_spacing);
+                if ($y + $line_h > $page_h - $margin) {
+                    // xuất trang cũ
+                    ob_start(); imagejpeg($im, null, 85); $jpg = ob_get_clean();
+                    imagedestroy($im);
+                    $pages[] = ['w' => $page_w, 'h' => $page_h, 'jpg' => $jpg];
+                    // trang mới
+                    $im = imagecreatetruecolor($page_w, $page_h);
+                    $white = imagecolorallocate($im, 255, 255, 255);
+                    $black = imagecolorallocate($im, 15, 23, 42);
+                    imagefilledrectangle($im, 0, 0, $page_w, $page_h, $white);
+                    $y = $margin;
+                }
+                imagettftext($im, $font_size, 0, $margin, $y, $black, $chosen_font, $ln);
+                $y += $line_spacing;
+            }
+        }
+        // xuất trang cuối
+        ob_start(); imagejpeg($im, null, 85); $jpg = ob_get_clean();
+        imagedestroy($im);
+        $pages[] = ['w' => $page_w, 'h' => $page_h, 'jpg' => $jpg];
+
+        // Xây PDF từ các ảnh JPEG
+        $pdf = "%PDF-1.4\n";
+        $offsets = [];
+        $objs = [];
+
+        // Tạo objects: mỗi trang gồm 1 XObject image + 1 content stream + 1 page; cuối cùng pages + catalog
+        $kids = [];
+        $obj_index = 1;
+        foreach ($pages as $pi => $pg) {
+            $img_obj = $obj_index++; // image object id
+            $cnt_obj = $obj_index++; // content object id
+            $pag_obj = $obj_index++; // page object id
+
+            // image object
+            $img = $pg['jpg'];
+            $img_len = strlen($img);
+            $objs[$img_obj] = "{$img_obj} 0 obj\n<< /Type /XObject /Subtype /Image /Width {$pg['w']} /Height {$pg['h']} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length {$img_len} >>\nstream\n" . $img . "\nendstream\nendobj\n";
+
+            // content stream (vẽ ảnh full trang)
+            $content = "q {$pg['w']} 0 0 {$pg['h']} 0 0 cm /Im{$img_obj} Do Q";
+            $objs[$cnt_obj] = "{$cnt_obj} 0 obj\n<< /Length " . strlen($content) . " >>\nstream\n" . $content . "\nendstream\nendobj\n";
+
+            // page object
+            $objs[$pag_obj] = "{$pag_obj} 0 obj\n<< /Type /Page /Parent %PAGES% /MediaBox [0 0 {$pg['w']} {$pg['h']}] /Resources << /XObject << /Im{$img_obj} {$img_obj} 0 R >> >> /Contents {$cnt_obj} 0 R >>\nendobj\n";
+            $kids[] = "{$pag_obj} 0 R";
+        }
+
+        // pages object id và catalog id
+        $pages_id = $obj_index++;
+        $cat_id = $obj_index++;
+
+        $kids_str = '[ ' . implode(' ', $kids) . ' ]';
+        $objs[$pages_id] = "{$pages_id} 0 obj\n<< /Type /Pages /Kids {$kids_str} /Count " . count($kids) . " >>\nendobj\n";
+        $objs[$cat_id] = "{$cat_id} 0 obj\n<< /Type /Catalog /Pages {$pages_id} 0 R >>\nendobj\n";
+
+        // kết hợp và tính offset
+        foreach ($objs as $id => $obj_str) {
+            // thay %PAGES% placeholder sau khi biết pages_id
+            $obj_str = str_replace('%PAGES%', $pages_id . ' 0 R', $obj_str);
+            $offsets[$id] = strlen($pdf);
+            $pdf .= $obj_str;
+        }
+
+        // xref
+        $xref_pos = strlen($pdf);
+        $pdf .= "xref\n0 " . ($cat_id + 1) . "\n0000000000 65535 f \n";
+        for ($i=1; $i <= $cat_id; $i++) {
+            $off = isset($offsets[$i]) ? $offsets[$i] : 0;
+            $pdf .= sprintf("%010d 00000 n \n", $off);
+        }
+        $pdf .= "trailer\n<< /Size " . ($cat_id + 1) . " /Root {$cat_id} 0 R >>\nstartxref\n" . $xref_pos . "\n%%EOF";
+
+        header('Content-Type: application/pdf');
+        header('Content-Disposition: attachment; filename="transcript-' . $timestamp . '.pdf"');
+        header('Content-Length: ' . strlen($pdf));
+        echo $pdf;
+        exit;
+    }
+}
+add_action('init', 'attc_handle_download_transcript_pdf');
 
 // Endpoint để tải file docx (tóm tắt)
 function attc_handle_download_summary() {
@@ -1774,6 +2016,11 @@ add_action('rest_api_init', function () {
                     'timestamp' => $ts,
                     'nonce' => $nonce,
                 ], home_url());
+                $payload['download_pdf_link'] = add_query_arg([
+                    'action' => 'attc_download_transcript_pdf',
+                    'timestamp' => $ts,
+                    'nonce' => $nonce,
+                ], home_url());
             }
             return new WP_REST_Response($payload, 200);
         }
@@ -1816,6 +2063,11 @@ add_action('rest_api_init', function () {
                 $nonce = wp_create_nonce('attc_download_' . $ts);
                 $payload['download_link'] = add_query_arg([
                     'action' => 'attc_download_transcript',
+                    'timestamp' => $ts,
+                    'nonce' => $nonce,
+                ], home_url());
+                $payload['download_pdf_link'] = add_query_arg([
+                    'action' => 'attc_download_transcript_pdf',
                     'timestamp' => $ts,
                     'nonce' => $nonce,
                 ], home_url());
@@ -1970,42 +2222,71 @@ function attc_process_job($job_id) {
     ];
 
     error_log(sprintf("[%s] Job %s: Preparing to call OpenAI API at %s (file: %s, size: %d bytes)\n", date('Y-m-d H:i:s'), $job_id, $api_url, basename($send_path), (file_exists($send_path)?filesize($send_path):0)), 3, WP_CONTENT_DIR . '/attc_debug.log');
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $api_url);
-    curl_setopt($ch, CURLOPT_POST, 1);
-    curl_setopt($ch, CURLOPT_HTTPHEADER, $headers_in);
-    if (defined('CURL_HTTP_VERSION_2TLS')) { curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS); }
-    if (defined('CURLOPT_TCP_KEEPALIVE')) { curl_setopt($ch, CURLOPT_TCP_KEEPALIVE, 1); }
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $post_fields);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 600);
 
-    $t_curl_start = microtime(true);
-    $response_body_str = curl_exec($ch);
-    $t_curl_end = microtime(true);
-    $curl_secs = number_format($t_curl_end - $t_curl_start, 3);
-    $response_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curl_error = curl_error($ch);
-    curl_close($ch);
-    error_log(sprintf("[%s] Job %s: cURL response (%.3fs). Code: %d. Body: %s. cURL Error: %s\n", date('Y-m-d H:i:s'), $job_id, $curl_secs, $response_code, $response_body_str, $curl_error), 3, WP_CONTENT_DIR . '/attc_debug.log');
+    $max_attempts = 3;
+    $attempt = 0;
+    $response_code = 0;
+    $response_body_str = '';
+    $curl_error = '';
+    $response_body = null;
 
-    if ($curl_error) {
+    while ($attempt < $max_attempts) {
+        $attempt++;
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $api_url);
+        curl_setopt($ch, CURLOPT_POST, 1);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers_in);
+        if (defined('CURL_HTTP_VERSION_2TLS')) { curl_setopt($ch, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS); }
+        if (defined('CURLOPT_TCP_KEEPALIVE')) { curl_setopt($ch, CURLOPT_TCP_KEEPALIVE, 1); }
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $post_fields);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 600);
+
+        $t_curl_start = microtime(true);
+        $response_body_str = curl_exec($ch);
+        $t_curl_end = microtime(true);
+        $curl_secs = number_format($t_curl_end - $t_curl_start, 3);
+        $response_code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curl_error = (string) curl_error($ch);
+        curl_close($ch);
+        error_log(sprintf("[%s] Job %s: Attempt %d/%d cURL response (%.3fs). Code: %d. Body: %s. cURL Error: %s\n", date('Y-m-d H:i:s'), $job_id, $attempt, $max_attempts, $curl_secs, $response_code, $response_body_str, $curl_error), 3, WP_CONTENT_DIR . '/attc_debug.log');
+
+        // Retry conditions: cURL error, 5xx, empty body, or server generic error message
+        $should_retry = false;
+        if (!empty($curl_error)) { $should_retry = true; }
+        if ($response_code >= 500) { $should_retry = true; }
+        if ($response_code === 0 || $response_body_str === '' || $response_body_str === false) { $should_retry = true; }
+        if (strpos($response_body_str, 'The server had an error while processing your request') !== false) { $should_retry = true; }
+
+        if (!$should_retry) { break; }
+
+        // Backoff: 1s, 2s
+        if ($attempt < $max_attempts) { sleep($attempt); }
+    }
+
+    if (!empty($curl_error)) {
         $job['status'] = 'failed';
         $job['error'] = 'cURL: ' . $curl_error;
         update_option('attc_job_' . $job_id, $job);
-        // Clean up trimmed temp file
         if (!empty($tmp_trim) && file_exists($tmp_trim)) { @unlink($tmp_trim); }
         return;
     }
 
-    $response_body = json_decode($response_body_str, true);
+    $response_body = json_decode((string)$response_body_str, true);
 
     // Clean up trimmed temp file when done
     if (!empty($tmp_trim) && file_exists($tmp_trim)) { @unlink($tmp_trim); }
     if ($response_code !== 200) {
+        $friendly = 'OpenAI error.';
+        if (is_array($response_body) && isset($response_body['error']['message'])) {
+            $friendly = (string) $response_body['error']['message'];
+        } else {
+            // đính kèm mã lỗi để dễ debug
+            $friendly = sprintf('OpenAI HTTP %d. %s', $response_code, mb_substr((string)$response_body_str, 0, 300));
+        }
         $job['status'] = 'failed';
-        $job['error'] = isset($response_body['error']['message']) ? $response_body['error']['message'] : 'OpenAI error.';
+        $job['error'] = $friendly;
         update_option('attc_job_' . $job_id, $job);
         if (!empty($tmp_trim) && file_exists($tmp_trim)) { @unlink($tmp_trim); }
         return;
@@ -2179,7 +2460,8 @@ function attc_process_summary($job_id) {
     if (!empty($job['summary'])) return;
 
     $points = attc_get_summary_points();
-    $summary = attc_summarize_points($transcript, $points);
+    $clean_transcript = attc_vi_fix_sentence_boundaries($transcript);
+    $summary = attc_summarize_points($clean_transcript, $points);
     if (!is_string($summary) || trim($summary) === '') return;
     // Đảm bảo không vượt quá số ý cấu hình do các trường hợp xuống dòng bất ngờ
     $lines = preg_split('/\r\n|\r|\n/u', trim($summary));
@@ -2267,27 +2549,23 @@ function attc_form_shortcode() {
 .attc-result-actions { margin-top: 1.5rem; text-align: right; }
 .attc-result-actions .download-btn { 
     display: inline-block;
-    background-color: #2980b9;
     color: white !important;
-    padding: 0.8rem 1.5rem;
     border-radius: 5px;
     text-decoration: none;
     font-weight: 500;
     transition: background-color 0.2s;
 }
-.attc-result-actions .download-btn:hover { background-color: #3498db; }
+
         .attc-result-actions { margin-top: 1.5rem; text-align: right; }
         .attc-result-actions .download-btn { 
             display: inline-block;
-            background-color: #2980b9;
             color: white !important;
-            padding: 0.8rem 1.5rem;
             border-radius: 5px;
             text-decoration: none;
             font-weight: 500;
             transition: background-color 0.2s;
         }
-        .attc-result-actions .download-btn:hover { background-color: #3498db; }
+        
         #attc-result-tools {display: none;}
         /* Progress UI */
         .is-hidden { display: none; }
@@ -2317,7 +2595,7 @@ function attc_form_shortcode() {
         <div class="attc-wallet-box">
             <div class="attc-wallet-balance">
                 <?php if ($balance > $free_threshold): ?>
-                    <p><strong><?php echo number_format($balance, 0, ',', '.'); ?>đ</strong></p>
+                    <p>Số dư: <strong><?php echo number_format($balance, 0, ',', '.'); ?>đ</strong></p>
                     <p class="attc-wallet-sub">Tương đương <strong><?php echo $max_minutes; ?></strong> phút chuyển đổi</p>
                 <?php else: ?>
                     <p>Hôm nay bạn còn: <strong style="color: red; font-weight: bold; "><?php echo $free_uploads_left; ?></strong> lượt chuyển đổi miễn phí</p>
@@ -2386,6 +2664,7 @@ function attc_form_shortcode() {
         <?php 
             // Luôn render khối kết quả để JS có thể chèn transcript khi xong
             $download_link = '';
+            $download_pdf_link = '';
             if ($success_message) {
                 $history = get_user_meta($user_id, 'attc_wallet_history', true);
                 if (!empty($history)) {
@@ -2394,6 +2673,11 @@ function attc_form_shortcode() {
                         $download_nonce = wp_create_nonce('attc_download_' . $last_item['timestamp']);
                         $download_link = add_query_arg([
                             'action' => 'attc_download_transcript',
+                            'timestamp' => $last_item['timestamp'],
+                            'nonce' => $download_nonce,
+                        ], home_url());
+                        $download_pdf_link = add_query_arg([
+                            'action' => 'attc_download_transcript_pdf',
                             'timestamp' => $last_item['timestamp'],
                             'nonce' => $download_nonce,
                         ], home_url());
@@ -2411,7 +2695,22 @@ function attc_form_shortcode() {
             </div>
             <?php if ($download_link): ?>
             <div class="attc-result-actions">
-                <a href="<?php echo esc_url($download_link); ?>" class="download-btn">Tải kết quả (.docx)</a>
+            <span style="position: relative;top: -10px;font-style: italic;color: blue;text-decoration: underline;">Tải kết quả</span>
+                <a href="<?php echo esc_url($download_link); ?>" class="download-btn" aria-label="Tải DOCX" title="Tải DOCX">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <rect x="3" y="3" width="14" height="18" rx="2" ry="2" fill="#1E3A8A"/>
+                        <rect x="7" y="3" width="14" height="18" rx="2" ry="2" fill="#2563EB"/>
+                        <text x="14" y="16" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="9" fill="#ffffff" font-weight="700">W</text>
+                    </svg>
+                </a>
+                <?php if ($download_pdf_link): ?>
+                <a href="<?php echo esc_url($download_pdf_link); ?>" class="download-btn" style="aria-label="Tải PDF" title="Tải PDF">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="30" height="30" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <rect x="3" y="3" width="18" height="18" rx="2" ry="2" fill="#DC2626"/>
+                        <text x="12" y="16" text-anchor="middle" font-family="Segoe UI,Arial,sans-serif" font-size="8" fill="#ffffff" font-weight="700">PDF</text>
+                    </svg>
+                </a>
+                <?php endif; ?>
             </div>
             <?php endif; ?>
         </div>
@@ -2615,12 +2914,8 @@ function attc_form_shortcode() {
             if (submitButton.disabled) return;
             submitButton.disabled = true;
             submitButton.textContent = 'Đang xử lý, vui lòng chờ...';
-            if (progressWrap) {
-                progressWrap.classList.remove('is-hidden');
-                startFakeProgress();
-            }
-
-            // Cuộn ngay lên đầu trang để người dùng thấy thông báo + thanh loading
+            // Không hiển thị progress ngay tại submit để tránh nháy 2 lần.
+            // Progress sẽ hiển thị sau khi redirect với queue_notice (PRG).
             attcScrollToTitle();
         });
 
@@ -2631,9 +2926,15 @@ function attc_form_shortcode() {
         // Base URL để truy vấn trạng thái theo job_id (fallback)
         const jobStatusBase = '<?php echo esc_url_raw( rest_url('attc/v1/jobs/') ); ?>';
 
+        let waitSummaryAttempts = 0;
+        const waitSummaryMax = 6; // ~tối đa 6 lần
+
         function renderFinalResult(data) {
-            // 1. Dừng polling ngay lập tức
-            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+            // 1. Dừng polling chỉ khi đã có summary hoặc đã quá số lần chờ
+            const hasSummary = !!(data && typeof data.summary === 'string' && data.summary.trim().length > 0);
+            if (hasSummary || waitSummaryAttempts >= waitSummaryMax) {
+                if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+            }
 
             // 2. Dọn dẹp UI: ẩn progress và mọi thông báo info
             if (progressWrap) progressWrap.classList.add('is-hidden');
@@ -2673,6 +2974,13 @@ function attc_form_shortcode() {
                 } else {
                     summaryPanel.classList.add('is-hidden');
                     summaryList.innerHTML = '';
+                    // Chưa có summary: tiếp tục polling để chờ tóm tắt xuất hiện
+                    if (waitSummaryAttempts < waitSummaryMax) {
+                        waitSummaryAttempts++;
+                        if (!pollTimer) {
+                            pollTimer = setInterval(pollLatestJob, 3000);
+                        }
+                    }
                 }
             }
 
@@ -2684,7 +2992,22 @@ function attc_form_shortcode() {
                     actions.className = 'attc-result-actions';
                     if (resultContainer) resultContainer.appendChild(actions);
                 }
-                actions.innerHTML = `<a href="${data.download_link}" class="download-btn">Tải kết quả (.docx)</a>`;
+                let html = `<a href="${data.download_link}" class="download-btn" aria-label="Tải DOCX" title="Tải DOCX">
+                    <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"30\" height=\"30\" viewBox=\"0 0 24 24\" fill=\"none\">
+                        <rect x=\"3\" y=\"3\" width=\"14\" height=\"18\" rx=\"2\" ry=\"2\" fill=\"#1E3A8A\"/>
+                        <rect x=\"7\" y=\"3\" width=\"14\" height=\"18\" rx=\"2\" ry=\"2\" fill=\"#2563EB\"/>
+                        <text x=\"14\" y=\"16\" text-anchor=\"middle\" font-family=\"Segoe UI,Arial,sans-serif\" font-size=\"9\" fill=\"#ffffff\" font-weight=\"700\">W</text>
+                    </svg>
+                </a>`;
+                if (data.download_pdf_link) {
+                    html += ` <a href="${data.download_pdf_link}" class="download-btn" style="aria-label="Tải PDF" title="Tải PDF">
+                        <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"30\" height=\"30\" viewBox=\"0 0 24 24\" fill=\"none\">
+                            <rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" ry=\"2\" fill=\"#DC2626\"/>
+                            <text x=\"12\" y=\"16\" text-anchor=\"middle\" font-family=\"Segoe UI,Arial,sans-serif\" font-size=\"8\" fill=\"#ffffff\" font-weight=\"700\">PDF</text>
+                        </svg>
+                    </a>`;
+                }
+                actions.innerHTML = html;
             } else if (actions) {
                 actions.innerHTML = ''; // Xóa nút tải cũ nếu có
             }
