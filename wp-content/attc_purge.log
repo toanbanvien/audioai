@@ -1,0 +1,7 @@
+[2025-10-17 06:47:48] Purge start: retention=5 days, cutoff=2025-10-12 06:47:48
+[2025-10-17 06:47:48] Purged 9 items for user 3 (remain 0)
+[2025-10-17 06:47:48] Purged 9 items for user 6 (remain 3)
+[2025-10-17 06:47:48] Purged 1 items for user 2 (remain 0)
+[2025-10-17 06:47:48] Purged 23 items for user 5 (remain 27)
+[2025-10-17 06:47:48] Purged 19 items for user 4 (remain 21)
+[2025-10-17 06:47:48] Purge done: total_removed=61

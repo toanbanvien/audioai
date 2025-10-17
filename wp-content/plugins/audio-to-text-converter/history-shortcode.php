@@ -55,6 +55,17 @@ function attc_history_shortcode() {
           
         </div>
         <h2>Lịch sử giao dịch</h2>
+        <div class="attc-retention-note" role="note" aria-label="Lưu ý lưu trữ" style="margin:12px 0 4px; padding:12px 14px; background:linear-gradient(135deg,#fff7ed 0%, #fffbeb 60%); border:1px solid #fde68a; border-radius:8px; color:#7c2d12; display:flex; gap:10px; align-items:flex-start;">
+            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="flex:0 0 auto; margin-top:2px;">
+                <circle cx="12" cy="12" r="10" fill="#f59e0b" opacity="0.15"/>
+                <path d="M12 7.5a.9.9 0 1 0 0-1.8.9.9 0 0 0 0 1.8Zm0 10a.75.75 0 0 0 .75-.75v-6a.75.75 0 0 0-1.5 0v6c0 .414.336.75.75.75Z" fill="#b45309"/>
+            </svg>
+            <div>
+                <div style="font-weight:700; margin-bottom:2px;">Lưu ý thời gian lưu trữ</div>
+                <?php $retention_days = (int) get_option('attc_history_retention_days', 14); if ($retention_days <= 0) { $retention_days = 14; } ?>
+                <div style="line-height:1.6; color:#7c2d12;">Danh sách lịch sử chuyển đổi sẽ được <strong>lên lịch xóa sau <?php echo esc_html($retention_days); ?> ngày</strong> kể từ thời điểm file ghi âm được tạo ra.</div>
+            </div>
+        </div>
         <?php if (!is_array($history) || empty($history)): ?>
             <div class="attc-no-history">
                 <p>Chưa có lịch sử chuyển đổi.</p>
@@ -75,7 +86,23 @@ function attc_history_shortcode() {
                 <tbody>
                     <?php foreach ($history as $item): ?>
                     <tr>
-                        <td><?php echo wp_date('d/m/Y H:i', $item['timestamp']); ?></td>
+                        <td>
+                            <?php 
+                                $created_ts = (int)($item['timestamp'] ?? 0);
+                                $retention_days = (int) get_option('attc_history_retention_days', 14);
+                                if ($retention_days <= 0) { $retention_days = 14; }
+                                $expire_at = $created_ts + $retention_days * DAY_IN_SECONDS;
+                                $now_ts = time();
+                                $seconds_left = $expire_at - $now_ts;
+                                $days_left = (int) ceil($seconds_left / DAY_IN_SECONDS);
+                                echo wp_date('d/m/Y H:i', $created_ts);
+                                if ($seconds_left > 0) {
+                                    echo '<div class="attc-expiry-note" style="font-size:12px;color:#64748b;">Còn ' . esc_html($days_left) . ' ngày sẽ bị xóa</div>';
+                                } else {
+                                    echo '<div class="attc-expiry-note" style="font-size:12px;color:#9ca3af;">Đã đến hạn xóa</div>';
+                                }
+                            ?>
+                        </td>
                         <td>
                             <?php 
                                 $type = $item['type'] ?? 'N/A';
