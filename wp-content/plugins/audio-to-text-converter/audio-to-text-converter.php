@@ -10,6 +10,107 @@ if (!defined('ABSPATH')) {
     exit; // Chặn truy cập trực tiếp
 }
 
+// Trình sửa chính tả/chuẩn hoá tổng quát cho tiếng Việt (an toàn, không thay đổi nghĩa mạnh)
+if (!function_exists('attc_vi_spell_correct_all')) {
+function attc_vi_spell_correct_all($text) {
+    if (!is_string($text) || $text === '') return $text;
+    // Chuẩn hoá xuống dòng
+    $text = preg_replace("/\r\n?|\x0B|\f|\x85/u", "\n", $text);
+
+    // Cắt khoảng trắng thừa đầu/cuối mỗi dòng
+    $lines = preg_split('/\n/u', $text);
+    $out = [];
+    foreach ($lines as $ln) {
+        $t = trim($ln);
+        if ($t === '') { $out[] = ''; continue; }
+
+        // Nếu có hàm chuẩn hoá từ vựng, áp dụng trước
+        if (function_exists('attc_vi_normalize_lexicon')) {
+            $t = attc_vi_normalize_lexicon($t);
+        }
+
+        // Chuẩn hoá dấu ba chấm
+        $t = preg_replace('/\.{3,}/u', '…', $t);
+
+        // Sửa khoảng trắng quanh dấu câu: , . ; : ! ? … ) ] } và sau ( [ {
+        $t = preg_replace('/\s*([,.;:!?…])\s*/u', '$1 ', $t);
+        $t = preg_replace('/\s*([)\]\}])/u', '$1', $t);
+        $t = preg_replace('/([\(\[{])\s*/u', '$1', $t);
+        // Gỡ khoảng trắng trước dấu %
+        $t = preg_replace('/\s+%/u', '%', $t);
+        // Gộp khoảng trắng thừa
+        $t = preg_replace('/\s{2,}/u', ' ', $t);
+        // Loại bỏ lặp dấu chấm/ký tự kết câu
+        $t = preg_replace('/([.!?]){2,}/u', '$1', $t);
+
+        // Viết hoa chữ đầu dòng nếu chữ cái Latin/Vietnamese
+        $t = preg_replace_callback('/^([\p{Zs}\t]*)?([\p{L}])/u', function($m){
+            return ($m[1] ?? '') . mb_strtoupper($m[2], 'UTF-8');
+        }, $t, 1);
+
+        // Viết hoa sau dấu câu trong cùng dòng (., !, ?, …, có thể kèm ngoặc/ngoặc kép đóng)
+        $t = preg_replace_callback('/([.!?…]["\)\]\}]?\s+)([\p{Ll}])/u', function($m){
+            return $m[1] . mb_strtoupper($m[2], 'UTF-8');
+        }, $t);
+
+        // Đảm bảo có dấu câu kết thúc nếu là câu kết thúc hợp lệ
+        if (!preg_match('/[.!?…]$/u', $t)) {
+            $t .= '.';
+        }
+
+        // Gộp khoảng trắng thừa lần cuối
+        $t = preg_replace('/\s{2,}/u', ' ', $t);
+        $out[] = $t;
+    }
+
+    $res = implode("\n", $out);
+    // Sửa ranh giới câu (nếu có hàm)
+    if (function_exists('attc_vi_fix_sentence_boundaries')) {
+        $res = attc_vi_fix_sentence_boundaries($res);
+    }
+    // Gộp khoảng trắng thừa giữa các dòng trống
+    $res = preg_replace("/\n{3,}/u", "\n\n", $res);
+    return $res;
+}
+}
+
+// Background: generate summary directly from history item (fallback if user left page before job-based summary ran)
+add_action('attc_generate_summary_for_history', 'attc_generate_summary_for_history_handler', 10, 2);
+function attc_generate_summary_for_history_handler($user_id, $timestamp) {
+    $user_id = (int) $user_id;
+    $timestamp = (int) $timestamp;
+    if ($user_id <= 0 || $timestamp <= 0) return;
+
+    // Load history and find item
+    $history = get_user_meta($user_id, 'attc_wallet_history', true);
+    if (empty($history) || !is_array($history)) return;
+    $idx = -1;
+    for ($i = count($history) - 1; $i >= 0; $i--) {
+        if ((int)($history[$i]['timestamp'] ?? 0) === $timestamp) { $idx = $i; break; }
+    }
+    if ($idx === -1) return;
+    $meta = $history[$idx]['meta'] ?? [];
+    $transcript = (string)($meta['transcript'] ?? '');
+    $summary_old = (string)($meta['summary'] ?? '');
+    if ($transcript === '' || $summary_old !== '') return; // nothing to do
+
+    // Build summary (reuse same pipeline as job-based summary)
+    if (!function_exists('attc_get_summary_points')) return;
+    $points = attc_get_summary_points();
+    $clean_transcript = function_exists('attc_vi_fix_sentence_boundaries') ? attc_vi_fix_sentence_boundaries($transcript) : $transcript;
+    $summary = attc_summarize_points($clean_transcript, $points);
+    if (!is_string($summary) || trim($summary) === '') return;
+    $lines = preg_split('/\r\n|\r|\n/u', trim($summary));
+    if (is_array($lines) && count($lines) > $points) {
+        $lines = array_slice($lines, 0, $points);
+        $summary = implode("\n", $lines);
+    }
+
+    // Save back to history
+    $history[$idx]['meta']['summary'] = $summary;
+    update_user_meta($user_id, 'attc_wallet_history', $history);
+}
+
 // ===== Daily purge old history =====
 if (!has_action('attc_purge_old_history')) {
     add_action('attc_purge_old_history', 'attc_purge_old_history');
@@ -56,6 +157,15 @@ function attc_purge_old_history() {
                 if ($ts >= $cutoff) {
                     $new[] = $item;
                 } else {
+                    // Try to unlink audio file if present
+                    $ap = isset($item['meta']['audio_path']) ? (string)$item['meta']['audio_path'] : '';
+                    if ($ap && @file_exists($ap)) {
+                        if (@unlink($ap)) {
+                            @error_log(sprintf("[%s] Unlinked audio: %s (user %d)\n", date('Y-m-d H:i:s'), $ap, $uid), 3, $log_path);
+                        } else {
+                            @error_log(sprintf("[%s] Failed to unlink audio: %s (user %d)\n", date('Y-m-d H:i:s'), $ap, $uid), 3, $log_path);
+                        }
+                    }
                     $removed++;
                 }
             }
@@ -95,12 +205,19 @@ function attc_process_spellcheck($job_id) {
         if (empty($buffer)) return;
         $orig = $buffer;
         $joined = implode("\n", $orig);
-        $resp = attc_vi_correct_text($joined, $api_key);
+        $resp = '';
+        if (!empty($api_key)) { $resp = attc_vi_correct_text($joined, $api_key); }
+        // Fallback khi API rỗng/lỗi: dùng bộ quy tắc cục bộ để vẫn cho ra kết quả sạch
+        if (!is_string($resp) || trim($resp) === '') {
+            $fallback = attc_vi_spell_correct_all($joined);
+            $resp = is_string($fallback) ? $fallback : '';
+        }
         if (is_string($resp) && $resp !== '') {
             $parts = preg_split('/\r\n|\r|\n/u', $resp);
             if (is_array($parts) && count($parts) === count($orig)) {
                 foreach ($parts as $p) { $corrected_parts[] = trim($p); }
             } else {
+                // Giữ nguyên số dòng nếu output không khớp số dòng
                 foreach ($orig as $p) { $corrected_parts[] = trim($p); }
             }
         } else {
@@ -122,8 +239,16 @@ function attc_process_spellcheck($job_id) {
     if (!empty($buffer)) { $flush(); }
 
     $corrected = implode("\n", $corrected_parts);
+    // Hậu xử lý quy tắc để đảm bảo sạch dấu câu/khoảng trắng/viết hoa
+    if ($corrected !== '') {
+        $clean_rule = attc_vi_spell_correct_all($corrected);
+        if (is_string($clean_rule) && trim($clean_rule) !== '') {
+            $corrected = $clean_rule;
+        }
+    }
     if ($corrected !== '' && $corrected !== $transcript) {
         $job['transcript_corrected'] = $corrected;
+        $job['spellchecked'] = 1;
 
         // Cập nhật tóm tắt dựa trên bản hiệu chỉnh để đồng bộ
         if (attc_is_summary_enabled()) {
@@ -154,6 +279,10 @@ function attc_process_spellcheck($job_id) {
                 update_user_meta($user_id, 'attc_wallet_history', $history);
             }
         }
+    } else {
+        // Không có thay đổi đáng kể nhưng vẫn đánh dấu đã kiểm tra để UI có thể tiếp tục
+        $job['spellchecked'] = 1;
+        update_option($job_key, $job);
     }
 }
 
@@ -191,18 +320,74 @@ function attc_vi_fix_sentence_boundaries($text) {
 }
 
 
-// Tóm tắt trích xuất miễn phí: trả về 5-10 ý chính dạng gạch đầu dòng, tránh trùng lặp ý
+// Tóm tắt văn bản bằng OpenAI để có chất lượng cao hơn
+function attc_summarize_text_with_openai($text, $points, $api_key) {
+    if (empty($api_key) || !is_string($text) || trim($text) === '') return '';
+
+    $endpoint = 'https://api.openai.com/v1/chat/completions';
+    $headers = [
+        'Authorization' => 'Bearer ' . $api_key,
+        'Content-Type'  => 'application/json',
+    ];
+    if (strpos($api_key, 'sk-proj-') === 0) {
+        $attc_proj = get_option('attc_openai_project_id');
+        if (!empty($attc_proj)) {
+            $headers['OpenAI-Project'] = $attc_proj;
+        }
+    }
+
+    $system_prompt = <<<PROMPT
+Bạn là một biên tập viên chuyên nghiệp. Hãy đọc kỹ văn bản được cung cấp và tóm tắt lại nội dung chính thành chính xác {$points} ý, trình bày dưới dạng gạch đầu dòng. Mỗi ý phải là một câu văn hoàn chỉnh, súc tích, và diễn đạt một cách tự nhiên. Chỉ trả về kết quả tóm tắt, không thêm bất kỳ lời dẫn hay giải thích nào.
+PROMPT;
+
+    $user_prompt = <<<PROMPT
+Hãy tóm tắt văn bản sau thành {$points} ý chính:
+
+---
+
+{$text}
+PROMPT;
+
+    $payload = [
+        'model' => 'gpt-4o-mini',
+        'temperature' => 0.2,
+        'messages' => [
+            ['role' => 'system', 'content' => trim($system_prompt)],
+            ['role' => 'user', 'content' => trim($user_prompt)],
+        ],
+        'max_tokens' => 1024,
+    ];
+
+    $resp = wp_remote_post($endpoint, [
+        'timeout' => 90,
+        'headers' => $headers,
+        'body'    => wp_json_encode($payload),
+    ]);
+
+    if (is_wp_error($resp)) {
+        return '';
+    }
+
+    $code = wp_remote_retrieve_response_code($resp);
+    $body = json_decode(wp_remote_retrieve_body($resp), true);
+
+    if ($code === 200 && !empty($body['choices'][0]['message']['content'])) {
+        return trim($body['choices'][0]['message']['content']);
+    }
+
+    return '';
+}
+
+// Thuật toán tóm tắt cục bộ (fallback)
 function attc_summarize_points($text, $max_points = 7) {
     if (!is_string($text) || trim($text) === '') return '';
     $max_points = max(1, min(20, (int)$max_points));
     $sentences = attc_split_sentences($text);
     if (empty($sentences)) return '';
 
-    // Danh sách stopwords tiếng Việt cơ bản (có thể mở rộng)
     $stop = ['là','và','của','những','các','đang','sẽ','như','rằng','vì','thì','này','kia','được','trong','khi','với','cho','đến','từ','hay','hoặc','một','nhỉ','ạ','à','ừ','ờ','nhé','nhá','vâng','dạ','ờm','ah','à','ừm'];
     $stop_map = array_fill_keys($stop, true);
 
-    // Tính điểm từ khóa theo tần suất
     $freq = [];
     foreach ($sentences as $s) {
         $lc = mb_strtolower($s, 'UTF-8');
@@ -214,11 +399,9 @@ function attc_summarize_points($text, $max_points = 7) {
     }
     if (empty($freq)) return '';
 
-    // Chuẩn hóa điểm từ về [0,1]
     $maxf = max($freq);
     foreach ($freq as $k => $v) { $freq[$k] = $v / $maxf; }
 
-    // Chấm điểm câu
     $scored = [];
     foreach ($sentences as $idx => $s) {
         $lc = mb_strtolower($s, 'UTF-8');
@@ -230,19 +413,11 @@ function attc_summarize_points($text, $max_points = 7) {
             if (isset($stop_map[$w]) || !isset($freq[$w])) continue;
             $score += $freq[$w];
         }
-        // Heuristic: phạt câu quá ngắn hoặc quá dài
         $word_count = count(preg_split('/\s+/u', trim($s)));
-        // Phạt nặng câu quá ngắn (dưới 5 từ)
-        if ($word_count < 5) {
-            $score *= 0.05; 
-        } else if ($word_count > 30) { // Phạt câu quá dài (hơn 30 từ)
-            $score *= 0.5;
-        } else if ($word_count > 20) { // Phạt nhẹ câu hơi dài (20-30 từ)
-            $score *= 0.8;
-        } else { // Thưởng cho câu có độ dài lý tưởng (5-20 từ)
-            $score *= 1.2;
-        }
-        // Ưu tiên câu bắt đầu rõ ràng (chữ hoa, chủ ngữ + vị ngữ), giảm điểm câu mở đầu bằng liên từ/tiểu từ
+        if ($word_count < 5) { $score *= 0.05; } 
+        else if ($word_count > 30) { $score *= 0.5; } 
+        else if ($word_count > 20) { $score *= 0.8; } 
+        else { $score *= 1.2; }
         $starts = mb_strtolower(trim($s), 'UTF-8');
         if (preg_match('/^(và|với|cho|nhưng|rồi|thì|là|để|còn|mà|nên|hay|hoặc|tại vì|bởi vì|vì vậy)\b/u', $starts)) {
             $score *= 0.6;
@@ -251,16 +426,13 @@ function attc_summarize_points($text, $max_points = 7) {
         if ($firstChar !== '' && preg_match('/[\p{Lu}Đ]/u', $firstChar)) {
             $score *= 1.1;
         }
-        // Nhẹ ưu tiên câu xuất hiện sớm (gần đầu đoạn)
         $score *= (1.0 + max(0, 0.15 - min(0.15, $idx * 0.01)));
         $scored[] = ['i' => $idx, 's' => $s, 'score' => $score, 'set' => array_unique($words)];
     }
     if (empty($scored)) return '';
 
-    // Sắp xếp theo điểm giảm dần
     usort($scored, function($a, $b) { return $b['score'] <=> $a['score']; });
 
-    // Chọn top N, loại trùng ý bằng Jaccard
     $chosen = [];
     $chosen_sets = [];
     $threshold = 0.6;
@@ -277,7 +449,6 @@ function attc_summarize_points($text, $max_points = 7) {
         if (count($chosen) >= $max_points) break;
     }
     if (empty($chosen)) return '';
-    // Giữ lại thứ tự xuất hiện theo transcript để đọc tự nhiên
     usort($chosen, function($a, $b){ return $a['i'] <=> $b['i']; });
     $lines = array_map(function($x){ return '- ' . trim($x['s']); }, $chosen);
     return implode("\n", $lines);
@@ -368,10 +539,42 @@ function attc_vi_correct_text($text, $api_key) {
         }
     }
 
-    // Prompt mạnh hơn: đầu vào là N dòng, yêu cầu giữ NGUYÊN số dòng, sửa từng dòng độc lập, không gộp/tách
+    // Prompt chuyên sâu cho việc sửa lỗi văn bản từ giọng nói (ASR), có ví dụ (few-shot)
+    $system_prompt = <<<PROMPT
+Bạn là một chuyên gia ngôn ngữ tiếng Việt, chuyên sửa lỗi cho văn bản được chuyển đổi tự động từ giọng nói (ASR). Nhiệm vụ của bạn là đọc văn bản đầu vào, sửa các lỗi chính tả, ngữ pháp, dấu câu, và lỗi do nhận dạng sai (ví dụ: 'dìa' -> 'về', 'chúc' -> 'chức'), nhưng phải TUÂN THỦ các quy tắc sau:
+1.  **GIỮ NGUYÊN Ý NGHĨA**: Chỉ sửa lỗi, tuyệt đối không thêm, bớt, hay diễn giải lại ý của người nói.
+2.  **GIỮ NGUYÊN SỐ DÒNG**: Văn bản đầu vào có N dòng, đầu ra cũng phải có chính xác N dòng. Sửa trên từng dòng, không gộp hay tách dòng.
+3.  **GIỮ NGUYÊN TÊN RIÊNG VÀ TIẾNG ANH**: Không sửa các từ tiếng Anh, tên riêng, hoặc thuật ngữ kỹ thuật (ví dụ: 'API', 'React', 'JavaScript').
+4.  **ƯU TIÊN THUẬT NGỮ TÔN GIÁO**: Khi ngữ cảnh liên quan đến Cơ đốc giáo, hãy dùng đúng các từ như "Chúa", "Đức Chúa Trời", "Thiên Chúa", tránh nhầm thành "chú" (người thân).
+5.  **CHỈ TRẢ VỀ VĂN BẢN ĐÃ SỬA**: Không thêm bất kỳ lời giải thích, ghi chú hay ký tự nào khác.
+PROMPT;
+
+    $user_prompt = <<<PROMPT
+Đây là một vài ví dụ về cách sửa:
+[VÍ DỤ 1]
+Đầu vào:
+"hôm qua đi làm dìa
+chúc chúa ban phước cho mọi người"
+Đầu ra:
+"hôm qua đi làm về
+Chúa ban phước cho mọi người"
+
+[VÍ DỤ 2]
+Đầu vào:
+"tui đang test cái api
+chạy bằng react đó nha"
+Đầu ra:
+"tôi đang test cái API
+chạy bằng React đó nha"
+
+Bây giờ, hãy áp dụng các quy tắc trên để sửa văn bản sau. Chỉ trả về nội dung đã sửa.
+---
+{$text}
+PROMPT;
+
     $base_messages = [
-        [ 'role' => 'system', 'content' => 'Bạn là biên tập viên tiếng Việt. Hãy CHỈ chỉnh chính tả, dấu câu và từ vựng cho đúng nghĩa, KHÔNG thêm/bớt ý, KHÔNG biên soạn lại. Đầu vào có nhiều dòng, mỗi dòng là một câu/đoạn. Hãy giữ NGUYÊN số dòng và thứ tự dòng, sửa từng dòng độc lập, KHÔNG gộp hoặc tách dòng. Ưu tiên thuật ngữ tôn giáo đúng: "Chúa", "Đức Chúa Trời"; tránh nhầm lẫn với "chú" (người thân) trừ khi ngữ cảnh bắt buộc.' ],
-        [ 'role' => 'user', 'content' => "Yêu cầu:\n- Chỉnh chính tả tiếng Việt, thêm dấu, giữ nguyên ý nghĩa.\n- Giữ NGUYÊN số dòng, mỗi dòng tương ứng 1 dòng đầu vào.\n- Chỉ trả lời bằng văn bản đã chỉnh, KHÔNG giải thích.\n\n---\n\n" . $text ],
+        ['role' => 'system', 'content' => trim($system_prompt)],
+        ['role' => 'user', 'content' => trim($user_prompt)],
     ];
 
     // Thử model tốt hơn trước, fallback sang model cũ nếu lỗi
@@ -430,10 +633,15 @@ function attc_handle_download_transcript() {
         $history = get_user_meta($user_id, 'attc_wallet_history', true);
 
         $transcript_content = '';
+        $summary_content = '';
         if (!empty($history)) {
             foreach ($history as $item) {
                 if (($item['timestamp'] ?? 0) === $timestamp) {
-                    $transcript_content = $item['meta']['transcript'] ?? '';
+                    // Ưu tiên bản đã sửa lỗi, fallback về bản gốc
+                    $transcript_content = !empty($item['meta']['transcript_corrected']) 
+                        ? $item['meta']['transcript_corrected'] 
+                        : ($item['meta']['transcript'] ?? '');
+                    $summary_content = $item['meta']['summary'] ?? '';
                     break;
                 }
             }
@@ -472,7 +680,16 @@ function attc_handle_download_transcript() {
 </Relationships>';
 
         // Chuẩn hoá xuống dòng, tạo nhiều đoạn văn; font Times New Roman 16pt. Bỏ hoàn toàn in đậm.
-        $normalized = preg_replace("/\r\n|\r/", "\n", $transcript_content);
+        $full_content = '';
+        if (!empty($summary_content)) {
+            $full_content .= "TÓM TẮT NỘI DUNG\n\n";
+            $full_content .= $summary_content . "\n\n";
+            $full_content .= "---\n\n";
+        }
+        $full_content .= "NỘI DUNG CHI TIẾT\n\n";
+        $full_content .= $transcript_content;
+
+        $normalized = preg_replace("/\r\n|\r/", "\n", $full_content);
         $lines = explode("\n", $normalized);
         $paragraphs_xml = '';
         $run_props = '<w:rPr>'
@@ -527,10 +744,15 @@ function attc_handle_download_transcript_pdf() {
         $history = get_user_meta($user_id, 'attc_wallet_history', true);
 
         $transcript_content = '';
+        $summary_content = '';
         if (!empty($history)) {
             foreach ($history as $item) {
                 if (($item['timestamp'] ?? 0) === $timestamp) {
-                    $transcript_content = $item['meta']['transcript'] ?? '';
+                    // Ưu tiên bản đã sửa lỗi, fallback về bản gốc
+                    $transcript_content = !empty($item['meta']['transcript_corrected']) 
+                        ? $item['meta']['transcript_corrected'] 
+                        : ($item['meta']['transcript'] ?? '');
+                    $summary_content = $item['meta']['summary'] ?? '';
                     break;
                 }
             }
@@ -541,6 +763,15 @@ function attc_handle_download_transcript_pdf() {
         }
 
         // ====== Render PDF với GD + TrueType (UTF-8) ======
+        $full_content = '';
+        if (!empty($summary_content)) {
+            $full_content .= "TÓM TẮT NỘI DUNG\n\n";
+            $full_content .= $summary_content . "\n\n";
+            $full_content .= "--------------------\n\n";
+        }
+        $full_content .= "NỘI DUNG CHI TIẾT\n\n";
+        $full_content .= $transcript_content;
+
         if (!function_exists('imagecreatetruecolor') || !function_exists('imagettftext')) {
             wp_die('Máy chủ thiếu GD hoặc TTF để tạo PDF UTF-8.');
         }
@@ -1373,8 +1604,6 @@ function attc_upgrade_shortcode() {
     $bank_name_opt = get_option('attc_bank_name', 'ACB');
     $bank_acc_name_opt = get_option('attc_bank_account_name', 'DINH CONG TOAN');
     $bank_acc_number_opt = get_option('attc_bank_account_number', '240306539');
-    $momo_phone_opt = get_option('attc_momo_phone', '0772729789');
-    $momo_name_opt = get_option('attc_momo_name', 'DINH CONG TOAN');
     $plans = [
         [ 'id' => 'topup-20k',  'title' => 'Nạp 20.000đ',  'amount' => 20000 ],
         [ 'id' => 'topup-50k',  'title' => 'Nạp 50.000đ',  'amount' => 50000 ],
@@ -1415,12 +1644,12 @@ function attc_upgrade_shortcode() {
     .attc-userbar .attc-logout-btn { background: #e74c3c; color: #fff !important; text-decoration: none; padding: 8px 12px; border-radius: 6px; font-weight: 600; transition: background-color .2s; }
     .attc-userbar .attc-logout-btn:hover { background: #ff6b61; }
     #attc-payment-details.is-hidden, #attc-pricing-plans.is-hidden { display: none; }
-    .attc-payment-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-top: 1.5rem; }
+    .attc-payment-columns { display: grid; grid-template-columns: 1fr; gap: 1.5rem; margin-top: 1.5rem; }
     .attc-payment-column { border: 1px solid #e5e7eb; padding: 1.5rem; border-radius: 8px; background: #fff; text-align: center; }
-    .attc-payment-column h4 { margin-top: 0; margin-bottom: 1rem; }
+    .attc-payment-column h4 { margin-top: 0; margin-bottom: 0; }
     .attc-qr-code img { max-width: 250px; height: auto; margin: 0 auto; }
-    .attc-bank-info { text-align: left; margin-top: 1rem; }
-    .attc-bank-info p { margin: 0.5rem 0; }
+    .attc-bank-info { text-align: left; margin-top: 0; }
+    .attc-bank-info p { margin: 0.5rem 0;text-align:center; }
     #attc-success-message{font-weight: bold;color: green;font-size: 22px;}  
     </style>
     
@@ -1446,17 +1675,6 @@ function attc_upgrade_shortcode() {
 
             <div style="margin-bottom: 1rem; color: red;"><i>Lưu ý: Sau khi chuyển khoản thành công với đúng nội dung thanh toán, bạn hãy vào lại trang "Chuyển đổi giọng nói" để thực hiện chuyển đổi!</i></div>
             <div class="attc-payment-columns">
-                <div class="attc-payment-column">
-                    <h4>Ví MoMo</h4>
-                    <div class="attc-qr-code" id="attc-momo-qr"></div>
-                    <div class="attc-bank-info">
-                        <p><strong>Số điện thoại:</strong> <span id="momo-phone"><?php echo esc_html($momo_phone_opt); ?></span></p>
-                        <p><strong>Tên MoMo:</strong> <span id="momo-name"><?php echo esc_html($momo_name_opt); ?></span></p>
-                        <p><strong>Số tiền:</strong> <strong class="price-payment" id="momo-amount"></strong></p>
-                        <p><strong>Nội dung:</strong> <strong class="price-payment" id="momo-memo"></strong></p>
-                    </div>
-                    <p class="attc-qr-fallback">Mở MoMo, chọn "Quét Mã" và quét mã QR ở trên.</p>
-                </div>
                 <div class="attc-payment-column">
                     <h4>Chuyển khoản Ngân hàng (ACB)</h4>
                     <div class="attc-qr-code" id="attc-bank-qr"></div>
@@ -1977,9 +2195,27 @@ function attc_handle_form_submission() {
             wp_die('Vui lòng đăng nhập để sử dụng chức năng này.');
         }
 
+        if (isset($_FILES['audio_file'])) {
+            // Handle PHP upload errors early
+            if ($_FILES['audio_file']['error'] === UPLOAD_ERR_INI_SIZE || $_FILES['audio_file']['error'] === UPLOAD_ERR_FORM_SIZE) {
+                set_transient('attc_form_error', 'File vượt quá giới hạn kích thước cho phép của máy chủ. Vui lòng chọn file nhỏ hơn.', 30);
+                attc_redirect_back();
+            }
+        }
+
         if (isset($_FILES['audio_file']) && $_FILES['audio_file']['error'] === UPLOAD_ERR_OK) {
             $file = $_FILES['audio_file'];
             $user_id = get_current_user_id();
+
+            // Server-side: enforce max upload size (MB)
+            $max_mb = (int) get_option('attc_max_upload_mb', 20);
+            if ($max_mb > 0) {
+                $max_bytes = $max_mb * 1024 * 1024;
+                if (!empty($file['size']) && (int)$file['size'] > $max_bytes) {
+                    set_transient('attc_form_error', 'File vượt quá giới hạn ' . $max_mb . ' MB. Vui lòng chọn file nhỏ hơn.', 30);
+                    attc_redirect_back();
+                }
+            }
 
             // Concurrency lock (mutex) per user to avoid multiple parallel API calls
             $lock_key = 'attc_processing_lock_' . $user_id;
@@ -2144,6 +2380,9 @@ add_action('rest_api_init', function () {
             $tx = (string) ($job['transcript_corrected'] ?? '');
             if ($tx === '' && !empty($job['transcript'])) { $tx = (string) $job['transcript']; }
             if ($tx !== '') { $payload['transcript'] = $tx; }
+            // Flags
+            $payload['spellchecked'] = !empty($job['transcript_corrected']) || !empty($job['spellchecked']);
+            $payload['summary_enabled'] = function_exists('attc_is_summary_enabled') ? (bool) attc_is_summary_enabled() : false;
             if (!empty($job['summary'])) {
                 $payload['summary'] = (string) $job['summary'];
             }
@@ -2198,6 +2437,9 @@ add_action('rest_api_init', function () {
             $attc_tx = (string) ($job['transcript_corrected'] ?? '');
             if ($attc_tx === '' && !empty($job['transcript'])) { $attc_tx = (string) $job['transcript']; }
             if ($attc_tx !== '') { $payload['transcript'] = $attc_tx; }
+            // Flags
+            $payload['spellchecked'] = !empty($job['transcript_corrected']) || !empty($job['spellchecked']);
+            $payload['summary_enabled'] = function_exists('attc_is_summary_enabled') ? (bool) attc_is_summary_enabled() : false;
             if (!empty($job['error'])) {
                 $payload['error'] = (string) $job['error'];
             }
@@ -2364,9 +2606,12 @@ function attc_process_job($job_id) {
     $headers_in[] = 'Connection: keep-alive';
     $post_fields = [
         'model' => 'whisper-1',
-        // Không đặt 'language' để Whisper tự nhận diện và xử lý đa ngôn ngữ
         'response_format' => 'verbose_json',
         'temperature' => 0,
+        // Tham số nâng cao để giảm lặp lại và ảo giác
+        'compression_ratio_threshold' => 2.4,
+        'logprob_threshold' => -0.8,
+        'no_speech_threshold' => 0.6,
         'file' => curl_file_create($send_path, mime_content_type($send_path), basename($send_path))
     ];
 
@@ -2443,6 +2688,39 @@ function attc_process_job($job_id) {
 
     // Hậu xử lý đa ngôn ngữ: giữ nguyên thứ tự thầm gian segments, gom theo nhóm ngôn ngữ liên tiếp,
     // mỗi câu một dòng, chèn dòng trống khi đổi ngôn ngữ, và chỉ hiệu chỉnh câu tiếng Việt.
+
+    // Thêm hàm để xử lý các dòng lặp lại do Whisper hallucination
+    if (!function_exists('attc_collapse_repetitive_lines')) {
+        function attc_collapse_repetitive_lines($text) {
+            if (!is_string($text) || $text === '') {
+                return $text;
+            }
+            $lines = preg_split('/\r\n|\r|\n/u', $text);
+            if (empty($lines)) {
+                return $text;
+            }
+
+            $filtered_lines = [];
+            $last_line = null;
+
+            foreach ($lines as $line) {
+                $trimmed_line = trim($line);
+                // Chỉ thêm dòng nếu nó không trống và không giống hệt dòng trước đó
+                if ($trimmed_line !== '' && $trimmed_line !== $last_line) {
+                    $filtered_lines[] = $line;
+                    $last_line = $trimmed_line;
+                } elseif ($trimmed_line === '') {
+                    // Cho phép một dòng trống để phân tách đoạn, nhưng không cho phép nhiều dòng trống liên tiếp
+                    if ($last_line !== null) {
+                        $filtered_lines[] = '';
+                        $last_line = null; // Reset để dòng trống tiếp theo có thể được thêm nếu cần
+                    }
+                }
+            }
+            return implode("\n", $filtered_lines);
+        }
+    }
+
     $transcript = '';
     $has_segments = isset($response_body['segments']) && is_array($response_body['segments']);
     // groups: [{ lang: 'vi'|'en', sentences: [..] }]
@@ -2551,7 +2829,12 @@ function attc_process_job($job_id) {
 
     // Chỉ trừ tiền khi API trả về thành công
     if (!$is_free && $cost > 0) {
-        $charge_meta = ['reason' => 'audio_conversion', 'duration' => (int)($job['duration'] ?? 0), 'transcript' => $transcript];
+        $charge_meta = [
+            'reason' => 'audio_conversion',
+            'duration' => (int)($job['duration'] ?? 0),
+            'transcript' => $transcript,
+            'audio_path' => (string)($job['file_path'] ?? '')
+        ];
         $charge_result = attc_charge_wallet($user_id, $cost, $charge_meta);
         if (is_wp_error($charge_result)) {
             // Không thể trừ tiền: vẫn lưu transcript vào lịch sử với amount 0 để không mất dữ liệu
@@ -2566,7 +2849,12 @@ function attc_process_job($job_id) {
         $free_meta = [
             'type' => 'conversion_free',
             'amount' => 0,
-            'meta' => ['reason' => 'free_tier', 'duration' => (int)($job['duration'] ?? 0), 'transcript' => $transcript],
+            'meta' => [
+                'reason' => 'free_tier',
+                'duration' => (int)($job['duration'] ?? 0),
+                'transcript' => $transcript,
+                'audio_path' => (string)($job['file_path'] ?? '')
+            ],
         ];
         attc_add_wallet_history($user_id, $free_meta);
     }
@@ -2582,6 +2870,10 @@ function attc_process_job($job_id) {
             $job['history_timestamp'] = (int) $last_item['timestamp'];
         }
     }
+
+    // Lọc các dòng lặp lại do hallucination
+    $job['transcript'] = attc_collapse_repetitive_lines($job['transcript']);
+    $transcript = $job['transcript']; // Cập nhật biến cục bộ sau khi lọc
     update_option('attc_job_' . $job_id, $job);
     error_log(sprintf("[%s] Job %s: Final status updated to 'done'.\n", date('Y-m-d H:i:s'), $job_id), 3, WP_CONTENT_DIR . '/attc_debug.log');
 
@@ -2589,12 +2881,18 @@ function attc_process_job($job_id) {
     if ($transcript !== '' && attc_is_summary_enabled()) {
         if (!wp_next_scheduled('attc_run_summary', [$job_id])) {
             wp_schedule_single_event(time() + 1, 'attc_run_summary', [$job_id]);
+            // Nudge WP-Cron để chạy sớm
+            $cron_url = site_url('wp-cron.php');
+            @wp_remote_post($cron_url, ['timeout' => 0.01, 'blocking' => false]);
         }
     }
 
     // Hẹn sửa lỗi chính tả (hậu xử lý) chạy nền, không chặn UI
     if (!wp_next_scheduled('attc_run_spellcheck', [$job_id])) {
         wp_schedule_single_event(time() + 2, 'attc_run_spellcheck', [$job_id]);
+        // Nudge WP-Cron để chạy sớm
+        $cron_url = site_url('wp-cron.php');
+        @wp_remote_post($cron_url, ['timeout' => 0.01, 'blocking' => false]);
     }
 
     // Dọn file tạm
@@ -2615,7 +2913,13 @@ function attc_process_summary($job_id) {
 
     $points = attc_get_summary_points();
     $clean_transcript = attc_vi_fix_sentence_boundaries($transcript);
-    $summary = attc_summarize_points($clean_transcript, $points);
+    
+    // Ưu tiên dùng OpenAI để tóm tắt, nếu thất bại thì dùng thuật toán cục bộ
+    $api_key = trim((string) get_option('attc_openai_api_key'));
+    $summary = attc_summarize_text_with_openai($clean_transcript, $points, $api_key);
+    if (!is_string($summary) || trim($summary) === '') {
+        $summary = attc_summarize_points($clean_transcript, $points);
+    }
     if (!is_string($summary) || trim($summary) === '') return;
     // Đảm bảo không vượt quá số ý cấu hình do các trường hợp xuống dòng bất ngờ
     $lines = preg_split('/\r\n|\r|\n/u', trim($summary));
@@ -2679,14 +2983,14 @@ function attc_form_shortcode() {
     ?>
     <style>
         .attc-converter-wrap { max-width: 900px; margin: 2rem auto; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen-Sans, Ubuntu, Cantarell, "Helvetica Neue", sans-serif; }
-        .attc-wallet-box { background: #d6e4fd; border-radius: 8px; padding: 1.5rem; display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem; }
+        .attc-wallet-box { background: #d6e4fd; border-radius: 8px; padding: 1rem; display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; gap: 1rem; }
         .attc-wallet-balance p { margin: 0; font-size: 1.1rem; } .attc-wallet-balance p strong { font-size: 1.5rem; color: #2c3e50; }
-        .attc-wallet-sub { color: #5a6e82; font-size: 0.9rem; }
+        .attc-wallet-sub { color: #5a6e82; font-size: 1.2rem; }
         .attc-wallet-actions a { text-decoration: none; padding: 0.6rem 1rem; border-radius: 5px; font-weight: 500; transition: background-color 0.2s; }
         .attc-wallet-actions .upgrade-btn { background-color: #3498db; color: white; }
         .attc-wallet-actions .history-btn { background-color: #95a5a6; color: white; }
         .attc-wallet-actions .logout-btn { background-color: #e74c3c; color: white; margin-left: 0.5rem; }
-        .attc-alert { padding: 1rem; margin-bottom: 1.5rem; border-radius: 5px; border: 1px solid transparent; }
+        .attc-alert { padding: 1rem; margin-bottom: 1rem; border-radius: 5px; border: 1px solid transparent; }
         .attc-error { color: #c0392b; background-color: #fbeae5; border-color: #f4c2c2; }
         .attc-info { color: #2980b9; background-color: #eaf5fb; border-color: #b3dcf4; }
         .attc-form-upload { border: 2px dashed #bdc3c7; border-radius: 8px; padding: 2rem; text-align: center; background-color: #fafafa; transition: background-color 0.2s, border-color 0.2s; }
@@ -2782,7 +3086,7 @@ function attc_form_shortcode() {
         <?php if ($last_cost): ?><div class="attc-alert attc-info"><?php echo esc_html($last_cost); ?></div><?php endif; ?>
         <?php if ($queue_notice): ?><div class="attc-alert attc-info" id="attc-queue-notice"><?php echo esc_html($queue_notice); ?></div><?php endif; ?>
 
-        <div class="attc-quality-hint" role="note" aria-label="Lưu ý chất lượng âm thanh" style="margin:16px 0 10px; padding:14px 16px; background: linear-gradient(135deg,#eef2ff 0%, #e0f2fe 60%); border:1px solid #dbeafe; border-radius:10px; display:flex; align-items:flex-start; gap:12px; box-shadow:0 2px 8px rgba(15,23,42,.06);">
+        <div class="attc-quality-hint" role="note" aria-label="Lưu ý chất lượng âm thanh" style="margin:16px 0 10px; padding:10px; background: linear-gradient(135deg,#eef2ff 0%, #e0f2fe 60%); border:1px solid #dbeafe; border-radius:10px; display:flex; align-items:flex-start; gap:12px; box-shadow:0 2px 8px rgba(15,23,42,.06);">
             <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="flex:0 0 auto;">
                 <circle cx="12" cy="12" r="10" fill="#2563EB" opacity="0.12"></circle>
                 <path d="M12 8.5a.875.875 0 1 0 0-1.75.875.875 0 0 0 0 1.75Zm0 8.25a.75.75 0 0 0 .75-.75v-5a.75.75 0 0 0-1.5 0v5c0 .414.336.75.75.75Z" fill="#1D4ED8"></path>
@@ -2799,6 +3103,9 @@ function attc_form_shortcode() {
             <?php wp_nonce_field('attc_form_action', 'attc_nonce'); ?>
             <div class="attc-form-upload" id="attc-drop-zone">
                 <p>Kéo và thả file ghi âm vào đây, hoặc</p>
+                <div style="margin:-6px 0 10px; font-size: 13px; color:#475569;">
+                    Giới hạn kích thước tối đa: <strong><?php echo (int) get_option('attc_max_upload_mb', 20); ?> MB</strong>
+                </div>
                 <label for="audio_file" class="file-input-label">Chọn từ máy tính</label>
                 <input type="file" id="audio_file" name="audio_file" accept="audio/*">
                 <div id="attc-file-info"></div>
@@ -2905,6 +3212,7 @@ function attc_form_shortcode() {
         const resultTextBox = document.querySelector('.attc-result-text');
         const resultToolbarId = 'attc-result-tools';
         let progressTimer = null;
+        let pollTimer = null;
         // Dùng để tránh mở hộp thoại chọn file 2 lần liền nhau
         let lastFileDialogAt = 0;
 
@@ -3033,11 +3341,29 @@ function attc_form_shortcode() {
         function updateFileUI(){
             if (fileInput.files && fileInput.files.length > 0) {
                 var file = fileInput.files[0];
-                fileInfo.textContent = 'File đã chọn: ' + file.name + ' (' + (file.size / 1024 / 1024).toFixed(2) + ' MB)';
-                submitButton.disabled = false;
+                var sizeMB = (file.size / 1024 / 1024).toFixed(2);
+                fileInfo.textContent = 'File đã chọn: ' + file.name + ' (' + sizeMB + ' MB)';
+
+                // Client-side size check
+                var maxMB = parseInt('<?php echo (int) get_option('attc_max_upload_mb', 20); ?>', 10) || 0;
+                if (maxMB > 0 && file.size > maxMB * 1024 * 1024) {
+                    submitButton.disabled = true;
+                    if (trimWarn) {
+                        trimWarn.classList.remove('is-hidden');
+                        trimWarn.textContent = 'File vượt quá giới hạn ' + maxMB + ' MB. Vui lòng chọn file nhỏ hơn.';
+                    }
+                } else {
+                    // Within limit, allow submit and hide warning (if it was shown before)
+                    submitButton.disabled = false;
+                    if (trimWarn) {
+                        trimWarn.classList.add('is-hidden');
+                    }
+                }
             } else {
                 fileInfo.textContent = '';
-                submitButton.disabled = true;
+            }
+            // Kiểm tra lại các điều kiện từ duration/trim sau khi chọn file
+            if (fileInput.files && fileInput.files[0]) {
             }
         }
         function loadAudioForAnalysis(file){
@@ -3079,8 +3405,24 @@ function attc_form_shortcode() {
         // Khởi tạo trạng thái nút submit theo file hiện có (nếu có)
         updateFileUI();
 
-        uploadForm.addEventListener('submit', function() {
-            if (submitButton.disabled) return;
+        uploadForm.addEventListener('submit', function(e) {
+            // Final gate: block submission if file exceeds configured size
+            try {
+                var maxMB = parseInt('<?php echo (int) get_option('attc_max_upload_mb', 20); ?>', 10) || 0;
+                if (fileInput && fileInput.files && fileInput.files[0] && maxMB > 0) {
+                    var f = fileInput.files[0];
+                    if (f.size > maxMB * 1024 * 1024) {
+                        if (trimWarn) {
+                            trimWarn.classList.remove('is-hidden');
+                            trimWarn.textContent = 'File vượt quá giới hạn ' + maxMB + ' MB. Vui lòng chọn file nhỏ hơn.';
+                        }
+                        submitButton.disabled = true;
+                        e.preventDefault();
+                        return;
+                    }
+                }
+            } catch(_) {}
+            if (submitButton.disabled) { e.preventDefault(); return; }
             submitButton.disabled = true;
             submitButton.textContent = 'Đang xử lý, vui lòng chờ...';
             // Không hiển thị progress ngay tại submit để tránh nháy 2 lần.
@@ -3099,19 +3441,29 @@ function attc_form_shortcode() {
         const waitSummaryMax = 6; // ~tối đa 6 lần
 
         function renderFinalResult(data) {
-            // 1. Dừng polling chỉ khi đã có summary hoặc đã quá số lần chờ
             const hasSummary = !!(data && typeof data.summary === 'string' && data.summary.trim().length > 0);
-            if (hasSummary || waitSummaryAttempts >= waitSummaryMax) {
-                if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+            const spellchecked = !!(data && data.spellchecked);
+            const summaryEnabled = !!(data && data.summary_enabled);
+            const ready = spellchecked && (!summaryEnabled || hasSummary);
+
+            // Nếu chưa sẵn sàng (chưa spellcheck xong hoặc chưa có summary khi có bật), tiếp tục hiển thị progress và polling
+            if (!ready) {
+                if (progressWrap) progressWrap.classList.remove('is-hidden');
+                if (!pollTimer) { pollTimer = setInterval(pollLatestJob, 3000); }
+                // Đừng render kết quả thô trước khi sẵn sàng
+                return;
             }
 
-            // 2. Dọn dẹp UI: ẩn progress và mọi thông báo info
+            // Đã sẵn sàng: dừng polling và hiển thị kết quả
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+
+            // Ẩn progress và thông báo hàng đợi
             if (progressWrap) progressWrap.classList.add('is-hidden');
             document.querySelectorAll('.attc-alert.attc-info').forEach(function(el) { el.style.display = 'none'; });
             var qn = document.getElementById('attc-queue-notice');
             if (qn) { qn.classList.add('is-hidden'); qn.style.display = 'none'; }
 
-            // 3. Hiển thị khối kết quả
+            // Hiển thị khối kết quả
             if (resultContainer) { resultContainer.classList.remove('is-hidden'); }
 
             // 4. Render văn bản
@@ -3237,7 +3589,7 @@ function attc_form_shortcode() {
             } catch(e) {}
         }
 
-        let pollTimer = null;
+        // pollTimer đã được khai báo phía trên, không khai báo lại để tránh lỗi trùng biến
         // Nếu có thông báo hàng đợi (sau khi upload và redirect), tự hiển thị progress
         const queueNoticeEl = document.getElementById('attc-queue-notice');
         if (queueNoticeEl && progressWrap) {
@@ -4095,6 +4447,22 @@ function attc_settings_init() {
         ]
     );
 
+    // Max upload size (MB) for audio
+    register_setting('attc_settings', 'attc_max_upload_mb');
+    add_settings_field(
+        'attc_max_upload_mb',
+        'Giới hạn dung lượng upload (MB)',
+        'attc_settings_field_html',
+        'attc-settings',
+        'attc_general_section',
+        [
+            'name' => 'attc_max_upload_mb',
+            'type' => 'number',
+            'desc' => 'Giới hạn kích thước file audio khi tải lên. Khuyến nghị: 20 MB để cân bằng tốc độ và độ ổn định.',
+            'default' => 20
+        ]
+    );
+
     // reCAPTCHA Section
     register_setting('attc_settings', 'attc_recaptcha_site_key');
     register_setting('attc_settings', 'attc_recaptcha_secret_key');
@@ -4167,25 +4535,7 @@ function attc_settings_init() {
         'attc_payment_section',
         ['name' => 'attc_bank_account_number', 'type' => 'text', 'desc' => 'Số tài khoản ngân hàng.']
     );
-    // MoMo settings
-    register_setting('attc_settings', 'attc_momo_phone');
-    register_setting('attc_settings', 'attc_momo_name');
-    add_settings_field(
-        'attc_momo_phone',
-        'Số điện thoại MoMo',
-        'attc_settings_field_html',
-        'attc-settings',
-        'attc_payment_section',
-        ['name' => 'attc_momo_phone', 'type' => 'text', 'desc' => 'Số điện thoại tài khoản MoMo nhận tiền.']
-    );
-    add_settings_field(
-        'attc_momo_name',
-        'Tên MoMo',
-        'attc_settings_field_html',
-        'attc-settings',
-        'attc_payment_section',
-        ['name' => 'attc_momo_name', 'type' => 'text', 'desc' => 'Tên hiển thị của tài khoản MoMo.']
-    );
+    // (Removed) MoMo settings
 
     // Fake Top-up Testing Key
     register_setting('attc_settings', 'attc_fake_topup_key');

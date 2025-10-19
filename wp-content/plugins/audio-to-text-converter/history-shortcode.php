@@ -13,6 +13,21 @@ function attc_history_shortcode() {
 
     $user_id = get_current_user_id();
     $history = get_user_meta($user_id, 'attc_wallet_history', true);
+
+    // Enqueue background summary generation for items missing summary (non-blocking)
+    if (is_array($history) && !empty($history)) {
+        foreach ($history as $item) {
+            $ts = (int)($item['timestamp'] ?? 0);
+            $meta = $item['meta'] ?? [];
+            $hasTranscript = !empty($meta['transcript']);
+            $hasSummary = !empty($meta['summary']);
+            if ($ts > 0 && $hasTranscript && !$hasSummary) {
+                if (!wp_next_scheduled('attc_generate_summary_for_history', [$user_id, $ts])) {
+                    wp_schedule_single_event(time() + 1, 'attc_generate_summary_for_history', [$user_id, $ts]);
+                }
+            }
+        }
+    }
     $display_name = wp_get_current_user()->display_name;
     $logout_url = wp_logout_url(get_permalink());
 
@@ -209,6 +224,7 @@ function attc_history_shortcode() {
                             <?php 
                                 $meta = $item['meta'] ?? [];
                                 $summary = $meta['summary'] ?? '';
+                                $hasTranscript = !empty($meta['transcript']);
                                 if (!empty($summary)) {
                                     $download_nonce = wp_create_nonce('attc_download_' . $item['timestamp']);
                                     $download_url = add_query_arg([
@@ -218,8 +234,11 @@ function attc_history_shortcode() {
                                     ], home_url());
                                     echo '<a href="' . esc_url($download_url) . '" class="attc-download-link">Tải tóm tắt (.docx)</a>';
                                     echo '<div class="attc-transcript-content">' . nl2br(esc_html($summary)) . '</div>';
+                                } elseif ($hasTranscript) {
+                                    echo '<div class="attc-transcript-content" style="font-style:italic;color:#475569;">Đang tạo tóm tắt...</div>';
                                 } else {
-                                    //echo '<em>Chưa có tóm tắt.</em>';
+                                    // No transcript available -> leave summary cell empty
+                                    echo '';
                                 }
                             ?>
                         </td>
@@ -229,6 +248,29 @@ function attc_history_shortcode() {
             </table>
         <?php endif; ?>
     </div>
+    <script>
+    (function(){
+        function hasPendingSummary(){
+            var nodes = document.querySelectorAll('.attc-transcript-content');
+            for (var i=0;i<nodes.length;i++){
+                var t = (nodes[i].textContent||'').trim();
+                if (t === 'Đang tạo tóm tắt...') return true;
+            }
+            return false;
+        }
+        var tries = 0;
+        var maxTries = 120; // ~20 phút nếu mỗi 10s
+        function tick(){
+            if (!hasPendingSummary() || tries++ > maxTries) { return; }
+            setTimeout(function(){
+                if (hasPendingSummary()) { window.location.reload(); }
+            }, 10000);
+        }
+        if (hasPendingSummary()) { tick(); }
+        // Also observe DOM mutations to re-arm after reload
+        document.addEventListener('visibilitychange', function(){ if (!document.hidden && hasPendingSummary()) { tick(); }});
+    })();
+    </script>
     <?php
     return ob_get_clean();
 }
