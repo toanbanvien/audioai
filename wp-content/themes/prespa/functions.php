@@ -177,6 +177,9 @@ function prespa_scripts() {
 	wp_enqueue_style( 'prespa-style', get_template_directory_uri() . '/build/css/main.css', array(), filemtime( get_template_directory() . '/build/css/main.css' ) );
 	wp_style_add_data( 'prespa-style', 'rtl', 'replace' );
 
+	$prespa_sticky_footer_css = 'html,body{height:100%}#page.site{min-height:100vh;display:flex;flex-direction:column}.site-wrapper{flex:1 0 auto}.site-footer{margin-top:auto}';
+	wp_add_inline_style( 'prespa-style', $prespa_sticky_footer_css );
+
 	wp_enqueue_script( 'prespa-script', get_template_directory_uri() . '/build/js/app.js', $script_asset['dependencies'], $script_asset['version'], true );
 
 	if ( is_singular() && comments_open() && get_option( 'thread_comments' ) ) {

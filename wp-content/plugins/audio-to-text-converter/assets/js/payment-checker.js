@@ -28,7 +28,13 @@ document.addEventListener('DOMContentLoaded', function() {
         return qrString;
     }
 
-    // (Removed) MoMo QR generator
+    function generateMomoQR(amount, memo) {
+        // MoMo cá nhân: dùng trang me.momo.vn với số điện thoại làm định danh
+        const phoneEl = document.getElementById('momo-phone');
+        const phone = (phoneEl ? phoneEl.textContent.trim() : '');
+        const qrString = `https://me.momo.vn/${encodeURIComponent(phone)}?amount=${encodeURIComponent(amount)}&note=${encodeURIComponent(memo)}`;
+        return qrString;
+    }
 
     function startPaymentCheck() {
         if (isChecking || document.hidden) return;
@@ -106,7 +112,7 @@ document.addEventListener('DOMContentLoaded', function() {
             notice.className = 'attc-notice';
             notice.style.display = 'none';
             notice.innerHTML = [
-                '<p style="font-size:28px"><strong>Nạp tiền thành công!</strong></p>',
+                '<p><strong>Nạp tiền thành công!</strong></p>',
                 '<p id="attc-success-message"></p>',
                 '<button id="attc-confirm-payment" class="attc-btn-primary">Quay lại chuyển đổi giọng nói</button>'
             ].join('');
@@ -156,7 +162,12 @@ document.addEventListener('DOMContentLoaded', function() {
             document.getElementById('bank-memo').textContent = memo;
             document.getElementById('attc-bank-qr').innerHTML = `<img src="${generateVietQR(amount, memo)}" alt="QR Code">`;
 
-            // (Removed) MoMo rendering
+            // Cập nhật thông tin MoMo
+            const momoAmountEl = document.getElementById('momo-amount');
+            const momoMemoEl = document.getElementById('momo-memo');
+            if (momoAmountEl) momoAmountEl.textContent = `${parseInt(amount).toLocaleString('vi-VN')}đ`;
+            if (momoMemoEl) momoMemoEl.textContent = memo;
+            document.getElementById('attc-momo-qr').innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(generateMomoQR(amount, memo))}" alt="MoMo QR Code">`;
 
             pricingPlans.classList.add('is-hidden');
             paymentDetails.classList.remove('is-hidden');

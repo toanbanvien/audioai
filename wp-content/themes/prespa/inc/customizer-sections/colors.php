@@ -230,7 +230,7 @@ if ( ! function_exists( 'prespa_customize_colors_css' ) ) :
 		<style>
 		body:not(.dark-mode) {
 		<?php if ( $links_text_color ) : ?>
-		--wp--preset--color--blue: <?php echo esc_attr( $links_text_color ); ?>;
+		--wp--preset--color--links: <?php echo esc_attr( $links_text_color ); ?>;
 		<?php endif; ?>
 		<?php if ( $link_headings_text_color ) : ?>
 		--wp--preset--color--link-headings: <?php echo esc_attr( $link_headings_text_color ); ?>;
@@ -307,7 +307,7 @@ if ( ! function_exists( 'prespa_customize_colors_css' ) ) :
 		@media(min-width:54rem){
 			body:not(.dark-mode):not(.has-transparent-header) .call-to-action.wp-block-button .wp-block-button__link {
 				background-color:  <?php echo esc_attr( $secondary_accent_color ); ?>;
-				color: var(--wp--preset--color--blue);
+				color: var(--wp--preset--color--links);
 				font-weight: bold;
 			}
 		}
